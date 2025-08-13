@@ -96,7 +96,7 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
       fetchMembers();
       fetchRoles();
     }
-  }, [isOpen, iTwin.id, iTwin.displayName]);
+  }, [isOpen, iTwin.id]);
 
   const refetchMembers = async () => {
     setIsLoadingMembers(true);

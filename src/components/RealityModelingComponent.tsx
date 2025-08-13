@@ -126,11 +126,15 @@ const RealityModelingComponent: React.FC = () => {
           {items.map((rd) => (
             <Card key={rd.id}>
               <CardHeader>
-                <CardTitle className="flex items-center justify-between text-base">
-                  <span className="truncate" title={rd.displayName}>{rd.displayName || 'Unnamed reality data'}</span>
-                  <Badge variant="secondary" className="ml-2 inline-flex items-center gap-1">
-                    <Layers className="h-3 w-3" /> {rd.type}
-                  </Badge>
+                <CardTitle className="text-base">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex-1 min-w-0">
+                      <span className="truncate block" title={rd.displayName}>{rd.displayName || 'Unnamed reality data'}</span>
+                    </div>
+                    <Badge variant="secondary" className="flex-shrink-0 inline-flex items-center gap-1 whitespace-nowrap">
+                      <Layers className="h-3 w-3" /> {rd.type}
+                    </Badge>
+                  </div>
                 </CardTitle>
                 <CardDescription className="truncate" title={rd.id}>ID: {rd.id}</CardDescription>
               </CardHeader>

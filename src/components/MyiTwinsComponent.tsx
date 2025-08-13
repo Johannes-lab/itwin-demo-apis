@@ -110,14 +110,14 @@ function MyiTwinsComponent() {
           >
             {/* Header */}
             <CardHeader>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-2">
-                  <CardTitle className="text-xl">{iTwin.displayName}</CardTitle>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex-1 min-w-0">
+                  <CardTitle className="text-xl truncate">{iTwin.displayName}</CardTitle>
                 </div>
-                <div className="flex items-center space-x-2">
+                <div className="flex-shrink-0">
                   <Badge
                     variant={iTwin.status === 'Active' ? 'default' : 'secondary'}
-                    className="text-xs"
+                    className="text-xs whitespace-nowrap"
                   >
                     {iTwin.status}
                   </Badge>
