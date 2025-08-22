@@ -55,6 +55,29 @@ export class iTwinAPIService {
     return accessControlService.getiTwinRoles(iTwinId);
   }
 
+  public async deleteiTwinRole(iTwinId: string, roleId: string) {
+    return accessControlService.deleteiTwinRole(iTwinId, roleId);
+  }
+
+  public async updateiTwinRole(
+    iTwinId: string,
+    roleId: string,
+    payload: Partial<Pick<import('../types').AccessControlRole, 'displayName' | 'description' | 'permissions'>>
+  ) {
+    return accessControlService.updateiTwinRole(iTwinId, roleId, payload);
+  }
+
+  public async listAllPermissions() {
+    return accessControlService.listAllPermissions();
+  }
+
+  public async createiTwinRole(
+    iTwinId: string,
+    payload: Pick<import('../types').AccessControlRole, 'displayName' | 'description'>
+  ) {
+    return accessControlService.createiTwinRole(iTwinId, payload);
+  }
+
   // Reality Management methods
   public async listRealityData(params?: import("../types").RealityDataListParams) {
     return realityManagementService.listRealityData(params);

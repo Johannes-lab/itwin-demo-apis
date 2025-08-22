@@ -44,8 +44,25 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
   const [roles, setRoles] = useState<AccessControlRole[]>([]);
   const [isLoadingRoles, setIsLoadingRoles] = useState(false);
   const [rolesError, setRolesError] = useState<string | null>(null);
+  const [isDeletingRoleId, setIsDeletingRoleId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [isUpdatingRoleId, setIsUpdatingRoleId] = useState<string | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
   const [newMemberEmail, setNewMemberEmail] = useState('');
   const [selectedRole, setSelectedRole] = useState('');
+  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
+  const [editingRole, setEditingRole] = useState<AccessControlRole | null>(null);
+  const [editDisplayName, setEditDisplayName] = useState('');
+  const [editDescription, setEditDescription] = useState('');
+  const [allPermissions, setAllPermissions] = useState<string[]>([]);
+  const [isLoadingPermissions, setIsLoadingPermissions] = useState(false);
+  const [permissionsError, setPermissionsError] = useState<string | null>(null);
+  const [editSelectedPermissions, setEditSelectedPermissions] = useState<string[]>([]);
+  const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
+  const [createDisplayName, setCreateDisplayName] = useState('');
+  const [createDescription, setCreateDescription] = useState('');
+  const [isCreatingRole, setIsCreatingRole] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
 
   // Fetch members and roles when modal opens
   useEffect(() => {
@@ -114,6 +131,116 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
       setMembersError('Failed to fetch members. Please check your permissions and try again.');
     } finally {
       setIsLoadingMembers(false);
+    }
+  };
+
+  const refetchRoles = async () => {
+    setIsLoadingRoles(true);
+    setRolesError(null);
+    try {
+      const fetchedRoles = await iTwinApiService.getiTwinRoles(iTwin.id);
+      if (fetchedRoles) {
+        setRoles(fetchedRoles);
+      } else {
+        setRolesError('Unable to fetch roles.');
+      }
+    } catch (e) {
+      console.error('Error refetching roles:', e);
+      setRolesError('Failed to refetch roles.');
+    } finally {
+      setIsLoadingRoles(false);
+    }
+  };
+
+  const handleDeleteRole = async (roleId: string) => {
+    setDeleteError(null);
+    const role = roles.find(r => r.id === roleId);
+    const confirmMsg = `Are you sure you want to delete the role "${role?.displayName || roleId}"? This action cannot be undone.`;
+    if (!window.confirm(confirmMsg)) return;
+    setIsDeletingRoleId(roleId);
+    // Optimistic update
+    const prevRoles = roles;
+    setRoles(prev => prev.filter(r => r.id !== roleId));
+    try {
+      const ok = await iTwinApiService.deleteiTwinRole(iTwin.id, roleId);
+      if (!ok) {
+        throw new Error('Delete failed');
+      }
+      // If deleted role was selected for invite default, adjust selection
+      setSelectedRole(sr => (sr === roleId ? (roles[0]?.id || '') : sr));
+    } catch (e: unknown) {
+      console.error('Delete role error:', e);
+      let message = 'Failed to delete role.';
+      if (typeof e === 'object' && e !== null && 'message' in e) {
+        const maybeMsg = (e as Record<string, unknown>).message;
+        if (typeof maybeMsg === 'string') message = maybeMsg;
+      }
+      setDeleteError(message);
+      // revert optimistic change
+      setRoles(prevRoles);
+    } finally {
+      setIsDeletingRoleId(null);
+    }
+  };
+
+  const handleEditRole = async (roleId: string) => {
+    setUpdateError(null);
+    const role = roles.find(r => r.id === roleId);
+    if (!role) return;
+    setEditingRole(role);
+    setEditDisplayName(role.displayName);
+    setEditDescription(role.description || '');
+    setEditSelectedPermissions([...(role.permissions || [])]);
+    // Fetch all permissions if not already
+    if (allPermissions.length === 0 && !isLoadingPermissions) {
+      setIsLoadingPermissions(true);
+      setPermissionsError(null);
+      iTwinApiService.listAllPermissions()
+        .then(perms => {
+          if (perms) setAllPermissions(perms);
+          else setPermissionsError('Failed to load permissions');
+        })
+        .catch(err => {
+          console.error('Error loading permissions', err);
+          setPermissionsError('Failed to load permissions');
+        })
+        .finally(() => setIsLoadingPermissions(false));
+    }
+    setIsEditDialogOpen(true);
+  };
+
+  const togglePermission = (perm: string) => {
+    setEditSelectedPermissions(prev => prev.includes(perm) ? prev.filter(p => p !== perm) : [...prev, perm]);
+  };
+
+  const submitRoleUpdate = async () => {
+    if (!editingRole) return;
+    setIsUpdatingRoleId(editingRole.id);
+    const roleId = editingRole.id;
+    const optimisticPrev = roles;
+    const updated: AccessControlRole = { ...editingRole, displayName: editDisplayName, description: editDescription, permissions: editSelectedPermissions };
+    setRoles(prev => prev.map(r => r.id === roleId ? updated : r));
+    try {
+      const result = await iTwinApiService.updateiTwinRole(iTwin.id, roleId, {
+        displayName: editDisplayName,
+        description: editDescription,
+        permissions: editSelectedPermissions,
+      });
+      if (!result) throw new Error('Failed to update role');
+      setRoles(prev => prev.map(r => r.id === roleId ? result : r));
+      setIsEditDialogOpen(false);
+      setEditingRole(null);
+    } catch (e: unknown) {
+      console.error('Update role error:', e);
+      let message = 'Failed to update role.';
+      if (typeof e === 'object' && e !== null && 'message' in e) {
+        const maybeMsg = (e as Record<string, unknown>).message;
+        if (typeof maybeMsg === 'string') message = maybeMsg;
+      }
+      setUpdateError(message);
+      setRoles(optimisticPrev);
+    } finally {
+      setIsUpdatingRoleId(null);
     }
   };
 
@@ -359,7 +486,7 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
                       <Shield className="h-5 w-5" />
                       <span>Role Definitions</span>
                     </span>
-                    <Button size="sm" disabled>
+                    <Button size="sm" onClick={() => { setCreateDisplayName(''); setCreateDescription(''); setCreateError(null); setIsCreateDialogOpen(true);} }>
                       <Plus className="h-4 w-4 mr-2" />
                       Create Role
                     </Button>
@@ -373,10 +500,11 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
                     </div>
                   )}
 
-                  {rolesError && (
+          {(rolesError || deleteError || updateError || createError) && (
                     <div className="flex items-center space-x-2 p-4 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 rounded-lg">
                       <AlertTriangle className="h-5 w-5 text-red-600" />
-                      <span className="text-red-800 dark:text-red-200">{rolesError}</span>
+            <span className="text-red-800 dark:text-red-200">{rolesError || deleteError || updateError || createError}</span>
+            <Button variant="ghost" size="sm" onClick={refetchRoles}>Retry</Button>
                     </div>
                   )}
 
@@ -417,11 +545,31 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
                             <Button variant="ghost" size="sm" title="View role" disabled>
                               <Eye className="h-4 w-4" />
                             </Button>
-                            <Button variant="ghost" size="sm" title="Edit role" disabled>
-                              <Edit className="h-4 w-4" />
+                            <Button 
+                              variant="ghost" 
+                              size="sm" 
+                              title="Edit role"
+                              onClick={() => handleEditRole(role.id)}
+                              disabled={isUpdatingRoleId === role.id}
+                            >
+                              {isUpdatingRoleId === role.id ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <Edit className="h-4 w-4" />
+                              )}
                             </Button>
-                            <Button variant="ghost" size="sm" title="Delete role" disabled>
-                              <Trash2 className="h-4 w-4" />
+                            <Button 
+                              variant="ghost" 
+                              size="sm" 
+                              title="Delete role" 
+                              disabled={isDeletingRoleId === role.id}
+                              onClick={() => handleDeleteRole(role.id)}
+                            >
+                              {isDeletingRoleId === role.id ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <Trash2 className="h-4 w-4" />
+                              )}
                             </Button>
                           </div>
                         </div>
@@ -481,6 +629,114 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
           </div>
         </Tabs>
       </DialogContent>
+      {/* Edit Role Dialog */}
+      <Dialog open={isEditDialogOpen} onOpenChange={(open) => { if (!open) { setIsEditDialogOpen(false); setEditingRole(null); } }}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Edit Role</DialogTitle>
+            <DialogDescription>Update role name, description and permissions.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="roleName">Display Name</Label>
+              <Input id="roleName" value={editDisplayName} onChange={(e) => setEditDisplayName(e.target.value)} />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="roleDesc">Description</Label>
+              <Input id="roleDesc" value={editDescription} onChange={(e) => setEditDescription(e.target.value)} />
+            </div>
+            <div className="space-y-2 max-h-64 overflow-y-auto border rounded-md p-3">
+              <div className="flex items-center justify-between">
+                <Label>Permissions</Label>
+                {isLoadingPermissions && <span className="text-xs text-muted-foreground flex items-center"><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Loading</span>}
+              </div>
+              {permissionsError && <p className="text-sm text-red-600">{permissionsError}</p>}
+              {!isLoadingPermissions && !permissionsError && allPermissions.length === 0 && (
+                <p className="text-sm text-muted-foreground">No permissions available.</p>
+              )}
+              <div className="grid grid-cols-2 gap-2">
+                {allPermissions.map(perm => {
+                  const checked = editSelectedPermissions.includes(perm);
+                  return (
+                    <label key={perm} className="flex items-center space-x-2 text-xs font-mono cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        className="hidden"
+                        checked={checked}
+                        onChange={() => togglePermission(perm)}
+                      />
+                      <div
+                        onClick={() => togglePermission(perm)}
+                        className={`w-4 h-4 rounded border flex items-center justify-center text-[10px] ${checked ? 'bg-primary text-primary-foreground' : 'bg-background'} cursor-pointer`}
+                      >
+                        {checked && '✓'}
+                      </div>
+                      <span className="truncate" title={perm}>{perm}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+            {updateError && <p className="text-sm text-red-600">{updateError}</p>}
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="outline" onClick={() => { setIsEditDialogOpen(false); setEditingRole(null); }}>Cancel</Button>
+              <Button onClick={submitRoleUpdate} disabled={isUpdatingRoleId === editingRole?.id}>
+                {isUpdatingRoleId === editingRole?.id && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                Save Changes
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+      {/* Create Role Dialog */}
+      <Dialog open={isCreateDialogOpen} onOpenChange={(open) => { if (!open) { setIsCreateDialogOpen(false); } }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Create Role</DialogTitle>
+            <DialogDescription>Provide a name and description for the new role.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="createRoleName">Display Name<span className="text-red-500 ml-0.5">*</span></Label>
+              <Input id="createRoleName" value={createDisplayName} onChange={(e) => setCreateDisplayName(e.target.value)} />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="createRoleDesc">Description<span className="text-red-500 ml-0.5">*</span></Label>
+              <Input id="createRoleDesc" value={createDescription} onChange={(e) => setCreateDescription(e.target.value)} />
+            </div>
+            {createError && <p className="text-sm text-red-600">{createError}</p>}
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="outline" onClick={() => setIsCreateDialogOpen(false)}>Cancel</Button>
+              <Button
+                onClick={async () => {
+                  setCreateError(null);
+                  if (!createDisplayName.trim() || !createDescription.trim()) { setCreateError('Display name and description are required.'); return; }
+                  setIsCreatingRole(true);
+                  try {
+                    const created = await iTwinApiService.createiTwinRole(iTwin.id, { displayName: createDisplayName.trim(), description: createDescription.trim() });
+                    if (!created) throw new Error('Failed to create role');
+                    setRoles(prev => [created, ...prev]);
+                    setIsCreateDialogOpen(false);
+                  } catch (e: unknown) {
+                    let msg = 'Failed to create role.';
+                    if (typeof e === 'object' && e !== null && 'message' in e) {
+                      const maybeMsg = (e as Record<string, unknown>).message;
+                      if (typeof maybeMsg === 'string') msg = maybeMsg;
+                    }
+                    setCreateError(msg);
+                  } finally {
+                    setIsCreatingRole(false);
+                  }
+                }}
+                disabled={isCreatingRole}
+              >
+                {isCreatingRole && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                Create
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </Dialog>
   );
 }
