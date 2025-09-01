@@ -8,6 +8,7 @@ import type {
   JobResponse,
   JobsResponse,
   CreateJobRequest,
+  JobProgressResponse,
 } from "../types";
 
 export class RealityModelingService extends BaseAPIClient {
@@ -79,9 +80,12 @@ export class RealityModelingService extends BaseAPIClient {
   }
 
   public async submitJob(jobId: string): Promise<Job | null> {
+    // Align with tutorial: PATCH job state to active
     try {
-      const data = await this.fetch<JobResponse>(`${API_CONFIG.ENDPOINTS.CONTEXT_CAPTURE.JOBS}/${jobId}/submit`, {
-        method: "POST",
+      const data = await this.fetch<JobResponse>(`${API_CONFIG.ENDPOINTS.CONTEXT_CAPTURE.JOBS}/${jobId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ state: "active" }),
       });
       return data.job;
     } catch (error) {
@@ -98,6 +102,16 @@ export class RealityModelingService extends BaseAPIClient {
       return data.job;
     } catch (error) {
       console.error("Error cancelling job:", error);
+      return null;
+    }
+  }
+
+  public async getJobProgress(jobId: string) {
+    try {
+      const data = await this.fetch<JobProgressResponse>(`${API_CONFIG.ENDPOINTS.CONTEXT_CAPTURE.JOBS}/${jobId}/progress`);
+      return data.jobProgress;
+    } catch (error) {
+      console.error("Error fetching job progress:", error);
       return null;
     }
   }

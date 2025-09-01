@@ -16,9 +16,9 @@ export const API_CONFIG = {
     // Access Control endpoints
     ACCESS_CONTROL: {
       MEMBERS: (iTwinId: string) => `/accesscontrol/itwins/${iTwinId}/members/users`,
-  ROLES: (iTwinId: string) => `/accesscontrol/itwins/${iTwinId}/roles`,
-  ROLE: (iTwinId: string, roleId: string) => `/accesscontrol/itwins/${iTwinId}/roles/${roleId}`,
-  ALL_PERMISSIONS: '/accesscontrol/itwins/permissions',
+      ROLES: (iTwinId: string) => `/accesscontrol/itwins/${iTwinId}/roles`,
+      ROLE: (iTwinId: string, roleId: string) => `/accesscontrol/itwins/${iTwinId}/roles/${roleId}`,
+      ALL_PERMISSIONS: '/accesscontrol/itwins/permissions',
     },
   },
 } as const;

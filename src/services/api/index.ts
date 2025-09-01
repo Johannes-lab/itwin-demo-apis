@@ -46,6 +46,10 @@ export class iTwinAPIService {
     return realityModelingService.cancelJob(jobId);
   }
 
+  public async getJobProgress(jobId: string) {
+    return realityModelingService.getJobProgress(jobId);
+  }
+
   // Access Control methods
   public async getiTwinUserMembers(iTwinId: string) {
     return accessControlService.getiTwinUserMembers(iTwinId);

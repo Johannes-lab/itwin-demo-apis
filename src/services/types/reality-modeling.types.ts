@@ -73,6 +73,17 @@ export interface JobsResponse {
   };
 }
 
+// Job progress tracking
+export interface JobProgress {
+  percentage: number; // 0-100
+  state: string; // e.g., Active, Completed, Failed
+  step: string; // current processing step
+}
+
+export interface JobProgressResponse {
+  jobProgress: JobProgress;
+}
+
 export interface CreateJobRequest {
   type: 'Full' | 'Calibration' | 'Reconstruction';
   name: string;

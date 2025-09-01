@@ -289,9 +289,9 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
       );
     }
     const MAX_BADGES = 4;
-  const shown = roles.slice(0, MAX_BADGES);
-  const extra = roles.length - shown.length;
-  const hidden = extra > 0 ? roles.slice(MAX_BADGES) : [];
+    const shown = roles.slice(0, MAX_BADGES);
+    const extra = roles.length - shown.length;
+    const hidden = extra > 0 ? roles.slice(MAX_BADGES) : [];
 
     return (
       <div className="flex flex-wrap gap-1 mt-1">
