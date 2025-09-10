@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 import { Folder, File, Loader2, Link as LinkIcon, Plus, Download, MoreHorizontal } from "lucide-react";
+import { BlockBlobClient } from "@azure/storage-blob";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
 
 type Node = { kind: 'folder'; item: StorageFolder };
@@ -28,19 +29,34 @@ export default function StorageComponent() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Create folder/file state
   const [newFolderName, setNewFolderName] = useState("");
   const [newFileName, setNewFileName] = useState("");
   const [creating, setCreating] = useState(false);
   const [fileLinks, setFileLinks] = useState<FileCreateLinksResponse | null>(null);
   const currentFolderId = useMemo(() => (path.length ? path[path.length - 1].item.id : rootFolderId), [path, rootFolderId]);
   const [downloadLinks, setDownloadLinks] = useState<Record<string, string>>({});
-  // Upload file (end-to-end) state
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  // Rename and Move modals state
+  const SINGLE_PUT_LIMIT = 256 * 1024 * 1024; //256 MB (api theoretical limit)
+
+  const uploadLargeToSas = async (uploadUrl: string, file: File, onProgress?: (pct: number) => void) => {
+    const client = new BlockBlobClient(uploadUrl);
+    const blockSize = 8 * 1024 * 1024; //8 MB chunks
+    const concurrency = 4; //number of parallel blocks
+    await client.uploadData(file, {
+      blockSize,
+      concurrency,
+      onProgress: (ev) => {
+        if (onProgress && file.size > 0) {
+          const pct = Math.round((ev.loadedBytes / file.size) * 100);
+          onProgress(pct);
+        }
+      },
+    });
+  };
+
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<{ id: string; type: 'file' | 'folder'; name: string } | null>(null);
   const [renameValue, setRenameValue] = useState('');
@@ -179,27 +195,31 @@ export default function StorageComponent() {
       const completeUrl = links._links.completeUrl?.href;
       if (!uploadUrl || !completeUrl) throw new Error('Upload links not provided');
 
-      // 2) Upload bytes via SAS using XHR for progress
-      await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('PUT', uploadUrl, true);
-        xhr.setRequestHeader('x-ms-blob-type', 'BlockBlob');
-        if (uploadFile.type) {
-          try { xhr.setRequestHeader('Content-Type', uploadFile.type); } catch { /* ignore setting content-type errors in XHR */ }
-        }
-        xhr.upload.onprogress = (evt) => {
-          if (evt.lengthComputable) {
-            const pct = Math.round((evt.loaded / evt.total) * 100);
-            setUploadProgress(pct);
+      // 2) Upload bytes: use chunked upload if file too large, else single PUT (XHR) for native progress
+      if (uploadFile.size > SINGLE_PUT_LIMIT) {
+        await uploadLargeToSas(uploadUrl, uploadFile, (pct) => setUploadProgress(pct));
+      } else {
+        await new Promise<void>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('PUT', uploadUrl, true);
+          xhr.setRequestHeader('x-ms-blob-type', 'BlockBlob');
+          if (uploadFile.type) {
+            try { xhr.setRequestHeader('Content-Type', uploadFile.type); } catch { /* ignore setting content-type errors in XHR */ }
           }
-        };
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) resolve();
-          else reject(new Error(`Upload failed with status ${xhr.status}`));
-        };
-        xhr.onerror = () => reject(new Error('Network error during upload'));
-        xhr.send(uploadFile);
-      });
+          xhr.upload.onprogress = (evt) => {
+            if (evt.lengthComputable) {
+              const pct = Math.round((evt.loaded / evt.total) * 100);
+              setUploadProgress(pct);
+            }
+          };
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) resolve();
+            else reject(new Error(`Upload failed with status ${xhr.status}`));
+          };
+          xhr.onerror = () => reject(new Error('Network error during upload'));
+          xhr.send(uploadFile);
+        });
+      }
 
       // 3) Complete file
       await storageService.completeByUrl(completeUrl);
