@@ -7,7 +7,7 @@ import { Badge } from './ui/badge';
 import { AlertTriangle, RefreshCw, Layers, Plus, Loader2 } from 'lucide-react';
 import { realityManagementService, realityModelingService, iTwinApiService } from '../services';
 import type { RealityDataSummary, RealityDataListResponse, RealityDataListParams, Workspace, Job, iTwin } from '../services/types';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from './ui/dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from './ui/dialog';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Separator } from './ui/separator';
@@ -394,6 +394,9 @@ const RealityModelingComponent: React.FC = () => {
       <DialogContent className="max-w-xl">
         <DialogHeader>
           <DialogTitle>New Reconstruction Workflow</DialogTitle>
+          <DialogDescription>
+            Create a workspace, choose inputs, configure job options, and submit for processing.
+          </DialogDescription>
         </DialogHeader>
         <div className="space-y-6 max-h-[70vh] overflow-y-auto pr-1">
           {step === 1 && (

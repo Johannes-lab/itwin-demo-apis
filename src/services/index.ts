@@ -7,7 +7,7 @@ export { RealityModelingService } from './api/RealityModelingService';
 export { AccessControlService } from './api/AccessControlService';
 
 // Export service instances
-export { realityModelingService, accessControlService, realityManagementService } from './api';
+export { realityModelingService, accessControlService, realityManagementService, synchronizationService, storageService } from './api';
 
 // Export unified service and instances (for backward compatibility)
 export { iTwinAPIService } from './api';

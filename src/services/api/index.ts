@@ -2,6 +2,8 @@ import { iTwinService } from "./iTwinService";
 import { RealityModelingService } from "./RealityModelingService";
 import { AccessControlService } from "./AccessControlService";
 import { RealityManagementService } from "./RealityManagementService";
+import { synchronizationService as synchronizationApiService } from "./SynchronizationService";
+import { storageService as storageApiService } from "./StorageService";
 import type { CreateJobRequest } from "../types";
 
 // Service instances
@@ -9,6 +11,8 @@ export const iTwinApiService = new iTwinService();
 export const realityModelingService = new RealityModelingService();
 export const accessControlService = new AccessControlService();
 export const realityManagementService = new RealityManagementService();
+export const synchronizationService = synchronizationApiService;
+export const storageService = storageApiService;
 
 // Unified service interface (for backward compatibility)
 export class iTwinAPIService {

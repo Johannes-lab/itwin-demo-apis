@@ -15,3 +15,20 @@ export interface iTwinsResponse {
     next?: { href: string };
   };
 }
+
+export interface iModel {
+  id: string;
+  displayName: string;
+  description?: string | null;
+  state?: string;
+  createdDateTime?: string;
+  updatedDateTime?: string;
+}
+
+export interface iModelsResponse {
+  iModels: iModel[];
+  _links: {
+    self: { href: string };
+    next?: { href: string };
+  };
+}

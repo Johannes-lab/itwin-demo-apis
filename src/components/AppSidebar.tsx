@@ -1,4 +1,4 @@
-import { Database, Drone } from 'lucide-react';
+import { Database, Drone, Repeat2, Folder } from 'lucide-react';
 import {
   Sidebar,
   SidebarContent,
@@ -10,31 +10,17 @@ import {
   SidebarMenuItem,
   SidebarHeader,
 } from './ui/sidebar';
+import { NavLink } from 'react-router-dom';
 
 // Navigation items for the sidebar
 const items = [
-  {
-    title: "My iTwins",
-    url: "#",
-    icon: Database,
-    view: 'my-itwins' as const
-  },
-  {
-    title: "Reality Modeling",
-    url: "#",
-    icon: Drone,
-    view: 'reality-modeling' as const
-  },
+  { title: "My iTwins", url: "/itwins", icon: Database },
+  { title: "Reality Modeling", url: "/reality-data", icon: Drone },
+  { title: "Synchronization", url: "/synchronization", icon: Repeat2 },
+  { title: "Storage", url: "/storage", icon: Folder },
 ];
 
-export type ViewType = 'my-itwins' | 'reality-modeling';
-
-interface AppSidebarProps {
-  activeView: ViewType;
-  setActiveView: (view: ViewType) => void;
-}
-
-function AppSidebar({ activeView, setActiveView }: AppSidebarProps) {
+function AppSidebar() {
   return (
     <Sidebar>
       <SidebarHeader className="border-b p-4">
@@ -47,13 +33,14 @@ function AppSidebar({ activeView, setActiveView }: AppSidebarProps) {
             <SidebarMenu>
               {items.map((item) => (
                 <SidebarMenuItem key={item.title}>
-                  <SidebarMenuButton 
-                    onClick={() => setActiveView(item.view)}
-                    isActive={activeView === item.view}
-                  >
-                    <item.icon />
-                    <span>{item.title}</span>
-                  </SidebarMenuButton>
+                  <NavLink to={item.url} className={({ isActive }) => isActive ? 'block' : 'block'}>
+                    {({ isActive }) => (
+                      <SidebarMenuButton isActive={isActive}>
+                        <item.icon />
+                        <span>{item.title}</span>
+                      </SidebarMenuButton>
+                    )}
+                  </NavLink>
                 </SidebarMenuItem>
               ))}
             </SidebarMenu>

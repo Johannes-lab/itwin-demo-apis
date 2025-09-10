@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { iTwinApiService } from '../services/iTwinAPIService';
 import type { iTwin } from '../services/iTwinAPIService';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
@@ -11,13 +12,17 @@ function MyiTwinsComponent() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectediTwinForAccess, setSelectediTwinForAccess] = useState<iTwin | null>(null);
+  const navigate = useNavigate();
+  const { itwinId } = useParams();
 
   const handleManageAccess = (iTwin: iTwin) => {
-    setSelectediTwinForAccess(iTwin);
+    // Navigate so URL reflects selection; modal will auto-open from param
+    navigate(`/itwins/${iTwin.id}`);
   };
 
   const closeAccessModal = () => {
     setSelectediTwinForAccess(null);
+    navigate('/itwins');
   };
 
   useEffect(() => {
@@ -37,6 +42,17 @@ function MyiTwinsComponent() {
 
     fetchiTwins();
   }, []);
+
+  // Auto-select based on route param
+  useEffect(() => {
+    if (!iTwins) return;
+    if (itwinId) {
+      const found = iTwins.find(t => t.id === itwinId);
+      if (found) setSelectediTwinForAccess(found);
+    } else {
+      setSelectediTwinForAccess(null);
+    }
+  }, [iTwins, itwinId]);
 
   if (isLoading) {
     return (
@@ -100,11 +116,11 @@ function MyiTwinsComponent() {
             className="group hover:shadow-lg transition-all duration-200 cursor-pointer overflow-hidden"
             role="button"
             tabIndex={0}
-            onClick={() => handleManageAccess(iTwin)}
+      onClick={() => handleManageAccess(iTwin)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
-                handleManageAccess(iTwin);
+        handleManageAccess(iTwin);
               }
             }}
           >
