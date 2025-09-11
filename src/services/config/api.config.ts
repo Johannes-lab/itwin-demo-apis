@@ -23,11 +23,19 @@ export const API_CONFIG = {
 
     // Synchronization endpoints
     SYNCHRONIZATION: {
+    // Generic connections (listing)
+      CONNECTIONS: '/synchronization/imodels/connections',
       MANIFEST_CONNECTIONS: '/synchronization/imodels/manifestconnections',
       MANIFEST_CONNECTION: (connectionId: string) => `/synchronization/imodels/manifestconnections/${connectionId}`,
       MANIFEST_RUNS: (connectionId: string) => `/synchronization/imodels/manifestconnections/${connectionId}/runs`,
       MANIFEST_RUN: (connectionId: string, runId: string) => `/synchronization/imodels/manifestconnections/${connectionId}/runs/${runId}`,
       REPORTS: (iModelId: string, runId: string, taskId?: string) => `/synchronization/reports?imodelId=${iModelId}&runId=${runId}${taskId ? `&taskId=${taskId}`: ''}`,
+      // Storage Connections
+      STORAGE_CONNECTIONS: '/synchronization/imodels/storageconnections',
+      STORAGE_CONNECTION_SOURCEFILES: (connectionId: string) => `/synchronization/imodels/storageconnections/${connectionId}/sourcefiles`,
+      STORAGE_CONNECTION_RUN: (connectionId: string) => `/synchronization/imodels/storageconnections/${connectionId}/runs`,
+      STORAGE_CONNECTION_RUNS: (connectionId: string) => `/synchronization/imodels/storageconnections/${connectionId}/runs`,
+      STORAGE_CONNECTION_RUN_ITEM: (connectionId: string, runId: string) => `/synchronization/imodels/storageconnections/${connectionId}/runs/${runId}`,
     },
 
     // Storage API endpoints

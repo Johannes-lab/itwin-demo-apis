@@ -24,7 +24,10 @@ function AppSidebar() {
   return (
     <Sidebar>
       <SidebarHeader className="border-b p-4">
-        <h2 className="font-semibold text-lg">iTwin Demo Portal</h2>
+        <div className="flex items-center gap-2">
+          <img src="/itwin.svg" alt="iTwin" className="h-6 w-6 dark:invert" />
+          <h2 className="font-semibold text-lg">iTwin Demo Portal</h2>
+        </div>
       </SidebarHeader>
       <SidebarContent>
         <SidebarGroup>
