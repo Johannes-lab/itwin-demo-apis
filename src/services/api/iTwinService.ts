@@ -20,22 +20,25 @@ export class iTwinService extends BaseAPIClient {
         return iTwinService.inflight;
       }
 
-      const request = this.fetch<iTwinsResponse>(`${API_CONFIG.ENDPOINTS.ITWINS}?includeInactive=true`, {
-        headers: {
-          Prefer: "return=representation",
-        },
-      })
-        .then((data) => {
-          const list = data.iTwins ?? null;
-          iTwinService.cache = { data: list, expiresAt: Date.now() + ttlMs };
-          return list;
-        })
-        .finally(() => {
-          iTwinService.inflight = null;
-        });
+      let allTwins: iTwin[] = [];
+      let nextUrl: string | null = `${API_CONFIG.ENDPOINTS.ITWINS}?includeInactive=true`;
 
-      iTwinService.inflight = request;
-      return await request;
+      while (nextUrl) {
+  const data: iTwinsResponse = await this.fetch(nextUrl, {
+          headers: {
+            Prefer: "return=representation",
+          },
+        });
+        if (Array.isArray(data.iTwins)) {
+          allTwins = allTwins.concat(data.iTwins);
+        }
+        nextUrl = data._links?.next?.href
+          ? data._links.next.href.replace(API_CONFIG.BASE_URL, "")
+          : null;
+      }
+
+      iTwinService.cache = { data: allTwins, expiresAt: Date.now() + ttlMs };
+      return allTwins;
     } catch (error) {
       console.error("Error fetching iTwins:", error);
       return null;
