@@ -1,12 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { iTwinApiService, storageService, API_CONFIG } from "../services";
 import type { iTwin } from "../services/iTwinAPIService";
-import type { FileCreateLinksResponse, FolderListResponse, StorageFile, StorageFolder, StorageListItem, TopLevelListResponse } from "../services/types";
+import type { FileCreateLinksResponse, FolderListResponse, FolderResponse, StorageFile, StorageFolder, StorageListItem, TopLevelListResponse } from "../services/types";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 import { Folder, File, Loader2, Link as LinkIcon, Plus, Download, MoreHorizontal } from "lucide-react";
@@ -19,48 +18,47 @@ function isFile(item: StorageListItem): item is StorageFile & { type: 'file' } {
 }
 
 export default function StorageComponent() {
+
+  // iTwin search and selection
   const [iTwins, setITwins] = useState<iTwin[]>([]);
   const [selectedITwinId, setSelectedITwinId] = useState("");
+  const [iTwinSearch, setITwinSearch] = useState("");
+  const [showDropdown, setShowDropdown] = useState(false);
   const [loadingITwins, setLoadingITwins] = useState(false);
 
+
+  // Storage state
   const [rootFolderId, setRootFolderId] = useState<string | null>(null);
   const [path, setPath] = useState<Node[]>([]);
   const [items, setItems] = useState<StorageListItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Current folder id (for actions)
+  const currentFolderId = useMemo(() => (path.length ? path[path.length - 1].item.id : rootFolderId), [path, rootFolderId]);
+
+  // Create folder/file
   const [newFolderName, setNewFolderName] = useState("");
   const [newFileName, setNewFileName] = useState("");
   const [creating, setCreating] = useState(false);
   const [fileLinks, setFileLinks] = useState<FileCreateLinksResponse | null>(null);
-  const currentFolderId = useMemo(() => (path.length ? path[path.length - 1].item.id : rootFolderId), [path, rootFolderId]);
-  const [downloadLinks, setDownloadLinks] = useState<Record<string, string>>({});
+
+  // Upload
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const SINGLE_PUT_LIMIT = 256 * 1024 * 1024; //256 MB (api theoretical limit)
+  const SINGLE_PUT_LIMIT = 256 * 1024 * 1024; //256 MB
 
-  const uploadLargeToSas = async (uploadUrl: string, file: File, onProgress?: (pct: number) => void) => {
-    const client = new BlockBlobClient(uploadUrl);
-    const blockSize = 8 * 1024 * 1024; //8 MB chunks
-    const concurrency = 4; //number of parallel blocks
-    await client.uploadData(file, {
-      blockSize,
-      concurrency,
-      onProgress: (ev) => {
-        if (onProgress && file.size > 0) {
-          const pct = Math.round((ev.loadedBytes / file.size) * 100);
-          onProgress(pct);
-        }
-      },
-    });
-  };
+  // Download
+  const [downloadLinks, setDownloadLinks] = useState<Record<string, string>>({});
 
+  // Rename
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<{ id: string; type: 'file' | 'folder'; name: string } | null>(null);
   const [renameValue, setRenameValue] = useState('');
 
+  // Move
   const [moveOpen, setMoveOpen] = useState(false);
   const [moveTarget, setMoveTarget] = useState<{ id: string; type: 'file' | 'folder' } | null>(null);
   const [moveQuery, setMoveQuery] = useState('');
@@ -68,6 +66,7 @@ export default function StorageComponent() {
   const [moveResults, setMoveResults] = useState<StorageFolder[]>([]);
   const [moveSelectedFolderId, setMoveSelectedFolderId] = useState<string>('');
 
+  // Format bytes utility
   const formatBytes = (bytes?: number): string => {
     if (bytes === undefined || bytes === null) return '-';
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -80,6 +79,7 @@ export default function StorageComponent() {
     return `${Math.round(val)} ${units[i]}`;
   };
 
+  // Load iTwins on mount
   useEffect(() => {
     const load = async () => {
       try {
@@ -93,6 +93,16 @@ export default function StorageComponent() {
     load();
   }, []);
 
+  // Auto-load storage when iTwin is selected
+  useEffect(() => {
+    if (selectedITwinId) {
+      loadTopLevel();
+    }
+    // Only run when selectedITwinId changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedITwinId]);
+
+  // Load top-level storage for selected iTwin
   const loadTopLevel = async () => {
     if (!selectedITwinId) return;
     try {
@@ -111,34 +121,59 @@ export default function StorageComponent() {
     } finally { setLoading(false); }
   };
 
-  const loadFolder = async (folderId: string, resetPath = false) => {
+  // Load folder contents
+  const loadFolder = async (folderId: string, isRoot = false) => {
     try {
-      setLoading(true); setError(null); setFileLinks(null);
-      const list: FolderListResponse = await storageService.listFolder(folderId);
-      setItems(list.items);
-      if (resetPath) {
-        const folder = await storageService.getFolder(folderId);
-        setPath([{ kind: 'folder', item: { ...folder.folder, type: 'folder' } }]);
+      setLoading(true); setError(null);
+      // Get folder items and details
+      const listRes: FolderListResponse = await storageService.listFolder(folderId);
+      setItems(listRes.items);
+      const folderRes: FolderResponse = await storageService.getFolder(folderId);
+      if (isRoot) {
+        setPath([{ kind: 'folder', item: folderRes.folder }]);
+      } else {
+        setPath((prev) => {
+          const idx = prev.findIndex(n => n.item.id === folderId);
+          if (idx >= 0) return prev.slice(0, idx + 1);
+          return [...prev, { kind: 'folder', item: folderRes.folder }];
+        });
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load folder');
     } finally { setLoading(false); }
   };
 
-  const enter = async (entry: StorageListItem) => {
-    if (entry.type === 'folder') {
-      setPath((p) => [...p, { kind: 'folder', item: entry as StorageFolder }]);
-      await loadFolder(entry.id);
+  // Upload large files to SAS
+  const uploadLargeToSas = async (uploadUrl: string, file: File, onProgress?: (pct: number) => void) => {
+    const client = new BlockBlobClient(uploadUrl);
+    const blockSize = 8 * 1024 * 1024; //8 MB chunks
+    const concurrency = 4; //number of parallel blocks
+    await client.uploadData(file, {
+      blockSize,
+      concurrency,
+      onProgress: (ev: { loadedBytes: number }) => {
+        if (onProgress && file.size > 0) {
+          const pct: number = Math.round((ev.loadedBytes / file.size) * 100);
+          onProgress(pct);
+        }
+      },
+    });
+  };
+
+  // Enter folder
+  const enter = (item: StorageListItem) => {
+    if (item.type === 'folder') {
+      loadFolder(item.id);
     }
   };
 
-  const goToCrumb = async (index: number) => {
-    if (index < 0 || index >= path.length) return;
-    const newPath = path.slice(0, index + 1);
-    setPath(newPath);
-    const folderId = newPath[newPath.length - 1].item.id;
-    await loadFolder(folderId);
+  // Breadcrumb navigation
+  const goToCrumb = (idx: number) => {
+    if (idx < 0 || idx >= path.length) return;
+    const folderId = path[idx].item.id;
+    loadFolder(folderId);
   };
+
 
   const goUp = async () => {
     if (path.length <= 1) return;
@@ -364,18 +399,43 @@ export default function StorageComponent() {
           <div className="space-y-2">
             <Label htmlFor="tw">iTwin</Label>
             <div className="flex gap-2">
-              <Select value={selectedITwinId} onValueChange={setSelectedITwinId}>
-                <SelectTrigger id="tw" className="flex-1" disabled={loadingITwins}>
-                  <SelectValue placeholder={loadingITwins ? 'Loading…' : 'Select an iTwin'} />
-                </SelectTrigger>
-                <SelectContent>
-                  {iTwins.map(t => (
-                    <SelectItem key={t.id} value={t.id}>
-                      {t.displayName} ({t.id.slice(0,8)}…)
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <div className="flex-1 relative">
+                <Input
+                  type="text"
+                  placeholder={loadingITwins ? 'Loading…' : 'Type to search iTwins'}
+                  value={iTwinSearch}
+                  onChange={e => {
+                    setITwinSearch(e.target.value);
+                    setSelectedITwinId("");
+                    setShowDropdown(true);
+                  }}
+                  onFocus={() => setShowDropdown(true)}
+                  onBlur={() => setTimeout(() => setShowDropdown(false), 150)}
+                  disabled={loadingITwins}
+                  autoComplete="off"
+                />
+                {/* Autocomplete dropdown */}
+                {(showDropdown && !loadingITwins && iTwins.length > 0 && iTwinSearch) && (
+                  <div className="absolute z-10 bg-white border rounded shadow w-full max-h-48 overflow-auto">
+                    {iTwins.filter(t =>
+                      t.displayName.toLowerCase().includes(iTwinSearch.toLowerCase())
+                    ).map(t => (
+                      <div
+                        key={t.id}
+                        className="px-3 py-2 cursor-pointer hover:bg-accent"
+                        onMouseDown={e => e.preventDefault()}
+                        onClick={() => {
+                          setSelectedITwinId(t.id);
+                          setITwinSearch(t.displayName);
+                          setShowDropdown(false);
+                        }}
+                      >
+                        {t.displayName} <span className="text-xs text-muted-foreground">({t.id.slice(0,8)}…)</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
               <Button onClick={loadTopLevel} disabled={!selectedITwinId || loading}>
                 {loading && <Loader2 className="h-4 w-4 mr-2 animate-spin"/>}
                 Load Storage
@@ -419,8 +479,11 @@ export default function StorageComponent() {
                   )}
                 </div>
                 {uploading && (
-                  <div className="h-2 w-full bg-muted rounded overflow-hidden">
-                    <div className="h-full bg-primary" style={{ width: `${uploadProgress}%` }} />
+                  <div className="flex items-center gap-2">
+                    <div className="h-2 w-full bg-muted rounded overflow-hidden">
+                      <div className="h-full bg-primary" style={{ width: `${uploadProgress}%` }} />
+                    </div>
+                    <span className="text-xs text-muted-foreground min-w-[32px] text-right">{uploadProgress}%</span>
                   </div>
                 )}
                 {uploadError && <p className="text-xs text-red-600">{uploadError}</p>}
