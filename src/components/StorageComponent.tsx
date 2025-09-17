@@ -479,8 +479,11 @@ export default function StorageComponent() {
                   )}
                 </div>
                 {uploading && (
-                  <div className="h-2 w-full bg-muted rounded overflow-hidden">
-                    <div className="h-full bg-primary" style={{ width: `${uploadProgress}%` }} />
+                  <div className="flex items-center gap-2">
+                    <div className="h-2 w-full bg-muted rounded overflow-hidden">
+                      <div className="h-full bg-primary" style={{ width: `${uploadProgress}%` }} />
+                    </div>
+                    <span className="text-xs text-muted-foreground min-w-[32px] text-right">{uploadProgress}%</span>
                   </div>
                 )}
                 {uploadError && <p className="text-xs text-red-600">{uploadError}</p>}
