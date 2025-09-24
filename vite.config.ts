@@ -11,4 +11,22 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  server: {
+    fs: {
+      allow: ['.', path.resolve(__dirname, 'node_modules')],
+    },
+  },
+  css: {
+    devSourcemap: false, // Disable CSS sourcemaps in dev
+  },
+  esbuild: {
+    sourcemap: false, // Disable esbuild sourcemaps
+  },
+  build: {
+    target: 'es2020',
+    sourcemap: false, // Disable sourcemap warnings
+  },
+  define: {
+    global: 'globalThis',
+  },
 })

@@ -9,6 +9,8 @@ export interface AuthContextType {
   signIn: () => Promise<void>;
   signOut: () => Promise<void>;
   getMe: () => Promise<MeProfile | null>;
+  getAccessToken: () => Promise<string | null>;
+  getAuthClient: () => any;
 }
 
 export const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -78,12 +80,22 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     return await authService.getMe();
   };
 
+  const getAccessToken = async () => {
+    return await authService.getAccessToken();
+  };
+
+  const getAuthClient = () => {
+    return authService;
+  };
+
   const value: AuthContextType = {
     isAuthenticated,
     isLoading,
     signIn,
     signOut,
     getMe,
+    getAccessToken,
+    getAuthClient,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
