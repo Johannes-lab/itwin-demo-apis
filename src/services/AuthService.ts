@@ -100,6 +100,10 @@ export class AuthService {
       return null;
     }
   }
+
+  getClient(): BrowserAuthorizationClient {
+    return this.client;
+  }
 }
 
 // Create a singleton instance

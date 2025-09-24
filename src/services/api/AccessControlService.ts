@@ -22,6 +22,18 @@ export class AccessControlService extends BaseAPIClient {
     }
   }
 
+  public async getUserById(iTwinId: string, userId: string): Promise<iTwinUserMember | null> {
+    try {
+      const members = await this.getiTwinUserMembers(iTwinId);
+      if (!members) return null;
+      
+      return members.find(member => member.id === userId) || null;
+    } catch (error) {
+      console.error("Error fetching user by ID:", error);
+      return null;
+    }
+  }
+
   public async getiTwinRoles(iTwinId: string): Promise<AccessControlRole[] | null> {
     try {
       const endpoint = API_CONFIG.ENDPOINTS.ACCESS_CONTROL.ROLES(iTwinId);

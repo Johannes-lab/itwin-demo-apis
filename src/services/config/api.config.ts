@@ -7,6 +7,40 @@ export const API_CONFIG = {
     // Core iTwin endpoints
     ITWINS: "/itwins",
     
+    // iModels endpoints
+    IMODELS: {
+      GET_IMODELS: (iTwinId?: string, top?: number, skip?: number) => {
+        const params = new URLSearchParams();
+        if (iTwinId) params.append('iTwinId', iTwinId);
+        if (typeof top === 'number') params.append('$top', top.toString());
+        if (typeof skip === 'number') params.append('$skip', skip.toString());
+        // Request additional fields that might not be included by default
+        params.append('$select', 'id,displayName,name,description,state,dataCenterLocation,createdDateTime,iTwinId,isSecured,extent,geographicCoordinateSystem,_links');
+        return `/imodels${params.toString() ? `?${params.toString()}` : ''}`;
+      },
+      GET_IMODEL: (iModelId: string) => `/imodels/${iModelId}`,
+      CREATE_IMODEL: '/imodels',
+      UPDATE_IMODEL: (iModelId: string) => `/imodels/${iModelId}`,
+      DELETE_IMODEL: (iModelId: string) => `/imodels/${iModelId}`,
+      CLONE_IMODEL: (iModelId: string) => `/imodels/${iModelId}/clone`,
+      GET_CHANGESETS: (iModelId: string, top?: number, skip?: number) => {
+        const params = new URLSearchParams();
+        if (typeof top === 'number') params.append('$top', top.toString());
+        if (typeof skip === 'number') params.append('$skip', skip.toString());
+        return `/imodels/${iModelId}/changesets${params.toString() ? `?${params.toString()}` : ''}`;
+      },
+      GET_NAMED_VERSIONS: (iModelId: string, top?: number, skip?: number) => {
+        const params = new URLSearchParams();
+        if (typeof top === 'number') params.append('$top', top.toString());
+        if (typeof skip === 'number') params.append('$skip', skip.toString());
+        return `/imodels/${iModelId}/namedversions${params.toString() ? `?${params.toString()}` : ''}`;
+      },
+      GET_NAMED_VERSION_DETAILS: (iModelId: string, namedVersionId: string) => `/imodels/${iModelId}/namedversions/${namedVersionId}`,
+      GET_CHANGESET_DETAILS: (iModelId: string, changesetId: string) => `/imodels/${iModelId}/changesets/${changesetId}`,
+      // iTwin Platform uses a separate download API
+      DOWNLOAD_CHANGESET: (iModelId: string, changesetIndex: number) => `/download/imodels/${iModelId}/changesets/${changesetIndex}`,
+    },
+    
     // Reality Modeling endpoints
     CONTEXT_CAPTURE: {
       WORKSPACES: "/contextcapture/workspaces",

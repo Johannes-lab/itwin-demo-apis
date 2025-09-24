@@ -29,7 +29,43 @@ export class BaseAPIClient {
       });
 
       if (response.ok) {
-        return response.json();
+        // For successful responses, check content type and length
+        const contentType = response.headers.get('content-type');
+        const contentLength = response.headers.get('content-length');
+        
+        // Handle different response types based on status code
+        if (response.status === 204) {
+          // No Content - return null
+          return null as T;
+        } else if (response.status === 202) {
+          // Accepted - return response info including headers for async operations  
+          const responseData = {
+            status: response.status,
+            statusText: response.statusText,
+            headers: Object.fromEntries(response.headers.entries()),
+            location: response.headers.get('Location'),
+            operationLocation: response.headers.get('Create-iModel-Operation')
+          };
+          return responseData as T;
+        }
+        
+        // Check if response has JSON content
+        if (!contentType || (!contentType.includes('application/json') && contentLength === '0')) {
+          return null as T;
+        }
+        
+        // Check if there's actually content to parse
+        const text = await response.text();
+        if (!text || text.trim() === '') {
+          return null as T;
+        }
+        
+        try {
+          return JSON.parse(text);
+        } catch (parseError) {
+          console.warn('Failed to parse JSON response:', text);
+          throw new Error(`Invalid JSON response: ${parseError}`);
+        }
       }
 
       if (response.status === 429 && canRetry && attempt < maxRetries) {

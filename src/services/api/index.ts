@@ -1,4 +1,5 @@
 import { iTwinService } from "./iTwinService";
+import { iModelService } from "./IModelService";
 import { RealityModelingService } from "./RealityModelingService";
 import { AccessControlService } from "./AccessControlService";
 import { RealityManagementService } from "./RealityManagementService";
@@ -8,6 +9,7 @@ import type { CreateJobRequest } from "../types";
 
 // Service instances
 export const iTwinApiService = new iTwinService();
+export const iModelApiService = iModelService;
 export const realityModelingService = new RealityModelingService();
 export const accessControlService = new AccessControlService();
 export const realityManagementService = new RealityManagementService();
