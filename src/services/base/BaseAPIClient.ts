@@ -38,13 +38,26 @@ export class BaseAPIClient {
           // No Content - return null
           return null as T;
         } else if (response.status === 202) {
-          // Accepted - return response info including headers for async operations  
+          // Accepted - return response info including headers for async operations
+          // For some APIs, 202 might include response body with links
+          let responseBody = null;
+          try {
+            const text = await response.text();
+            if (text && text.trim()) {
+              responseBody = JSON.parse(text);
+            }
+          } catch (parseError) {
+            // If parsing fails, continue without body
+            console.warn('Failed to parse 202 response body:', parseError);
+          }
+          
           const responseData = {
             status: response.status,
             statusText: response.statusText,
             headers: Object.fromEntries(response.headers.entries()),
             location: response.headers.get('Location'),
-            operationLocation: response.headers.get('Create-iModel-Operation')
+            operationLocation: response.headers.get('Create-iModel-Operation'),
+            body: responseBody
           };
           return responseData as T;
         }

@@ -25,6 +25,7 @@ export default function StorageComponent() {
   const [iTwinSearch, setITwinSearch] = useState("");
   const [showDropdown, setShowDropdown] = useState(false);
   const [loadingITwins, setLoadingITwins] = useState(false);
+  const [recentITwins, setRecentITwins] = useState<iTwin[]>([]);
 
 
   // Storage state
@@ -44,10 +45,11 @@ export default function StorageComponent() {
   const [fileLinks, setFileLinks] = useState<FileCreateLinksResponse | null>(null);
 
   // Upload
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadFiles, setUploadFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState<number>(0);
+  const [uploadProgress, setUploadProgress] = useState<{[key: string]: number}>({});
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [currentUploading, setCurrentUploading] = useState<string | null>(null);
   const SINGLE_PUT_LIMIT = 256 * 1024 * 1024; //256 MB
 
   // Download
@@ -79,6 +81,30 @@ export default function StorageComponent() {
     return `${Math.round(val)} ${units[i]}`;
   };
 
+  // Recent iTwins functionality
+  const loadRecentITwins = () => {
+    try {
+      const stored = localStorage.getItem('storage-recent-itwins');
+      if (stored) {
+        const recent = JSON.parse(stored) as iTwin[];
+        setRecentITwins(recent.slice(0, 5)); // Keep only last 5
+      }
+    } catch (error) {
+      console.warn('Failed to load recent iTwins:', error);
+    }
+  };
+
+  const addToRecentITwins = (iTwin: iTwin) => {
+    try {
+      const current = recentITwins.filter(item => item.id !== iTwin.id);
+      const updated = [iTwin, ...current].slice(0, 5); // Keep only last 5
+      setRecentITwins(updated);
+      localStorage.setItem('storage-recent-itwins', JSON.stringify(updated));
+    } catch (error) {
+      console.warn('Failed to save recent iTwin:', error);
+    }
+  };
+
   // Load iTwins on mount
   useEffect(() => {
     const load = async () => {
@@ -91,6 +117,7 @@ export default function StorageComponent() {
       } finally { setLoadingITwins(false); }
     };
     load();
+    loadRecentITwins(); // Load recent iTwins from localStorage
   }, []);
 
   // Auto-load storage when iTwin is selected
@@ -101,6 +128,13 @@ export default function StorageComponent() {
     // Only run when selectedITwinId changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedITwinId]);
+
+  const selectITwin = (iTwin: iTwin) => {
+    setSelectedITwinId(iTwin.id);
+    setITwinSearch(iTwin.displayName);
+    addToRecentITwins(iTwin);
+    setShowDropdown(false);
+  };
 
   // Load top-level storage for selected iTwin
   const loadTopLevel = async () => {
@@ -218,55 +252,244 @@ export default function StorageComponent() {
     } finally { setCreating(false); }
   };
 
-  const onUploadSelectedFile = async () => {
-    if (!currentFolderId || !uploadFile) return;
+  const onUploadSelectedFiles = async () => {
+    if (!currentFolderId || uploadFiles.length === 0) return;
     setUploadError(null);
     setUploading(true);
-    setUploadProgress(0);
+    setUploadProgress({});
+    
+    const totalFiles = uploadFiles.length;
+    let completedFiles = 0;
+    const results: Array<{ file: string; success: boolean; error?: string }> = [];
+    
     try {
-      // 1) Create file metadata to obtain SAS upload and complete links
-      const links = await storageService.createFile(currentFolderId, { displayName: uploadFile.name });
-      const uploadUrl = links._links.uploadUrl?.href;
-      const completeUrl = links._links.completeUrl?.href;
-      if (!uploadUrl || !completeUrl) throw new Error('Upload links not provided');
-
-      // 2) Upload bytes: use chunked upload if file too large, else single PUT (XHR) for native progress
-      if (uploadFile.size > SINGLE_PUT_LIMIT) {
-        await uploadLargeToSas(uploadUrl, uploadFile, (pct) => setUploadProgress(pct));
-      } else {
-        await new Promise<void>((resolve, reject) => {
-          const xhr = new XMLHttpRequest();
-          xhr.open('PUT', uploadUrl, true);
-          xhr.setRequestHeader('x-ms-blob-type', 'BlockBlob');
-          if (uploadFile.type) {
-            try { xhr.setRequestHeader('Content-Type', uploadFile.type); } catch { /* ignore setting content-type errors in XHR */ }
+      for (const file of uploadFiles) {
+        const fileKey = `${file.name}-${file.size}`;
+        setCurrentUploading(fileKey);
+        
+        try {
+          // 1) Create file metadata to obtain SAS upload and complete links
+          console.log(`Creating file metadata for: ${file.name}`);
+          
+          // Clean the filename to avoid potential issues with special characters
+          let cleanFileName = file.name.replace(/[<>:"/\\|?*]/g, '_');
+          
+          // Ensure filename isn't too long (many file systems have 255 char limits)
+          if (cleanFileName.length > 200) {
+            const extension = cleanFileName.substring(cleanFileName.lastIndexOf('.'));
+            const baseName = cleanFileName.substring(0, cleanFileName.lastIndexOf('.'));
+            cleanFileName = baseName.substring(0, 200 - extension.length) + extension;
+            console.log(`Filename truncated due to length: ${file.name} -> ${cleanFileName}`);
           }
-          xhr.upload.onprogress = (evt) => {
-            if (evt.lengthComputable) {
-              const pct = Math.round((evt.loaded / evt.total) * 100);
-              setUploadProgress(pct);
+          
+          console.log(`Original filename: ${file.name}, Clean filename: ${cleanFileName}`);
+          
+          let links;
+          try {
+            links = await storageService.createFile(currentFolderId, { displayName: cleanFileName });
+          } catch (apiError) {
+            console.error(`API error creating file ${cleanFileName}:`, apiError);
+            throw new Error(`Failed to create file ${cleanFileName}: ${apiError instanceof Error ? apiError.message : 'Unknown API error'}`);
+          }
+          
+          console.log(`File creation response for ${cleanFileName}:`, links);
+          
+          // Log all available headers when we get a 202 response to see what's available
+          if (links && typeof links === 'object' && 'status' in links && links.status === 202) {
+            const asyncResponse = links as any;
+            console.log(`202 Response headers for ${cleanFileName}:`, asyncResponse.headers);
+            console.log(`Available header keys:`, Object.keys(asyncResponse.headers || {}));
+            console.log(`Location header:`, asyncResponse.location);
+            console.log(`Operation Location header:`, asyncResponse.operationLocation);
+            console.log(`202 Response body for ${cleanFileName}:`, asyncResponse.body);
+            
+            // Check if the response body contains the upload links
+            if (asyncResponse.body && asyncResponse.body._links) {
+              console.log(`Found upload links in 202 response body for ${cleanFileName}`);
+              links = asyncResponse.body; // Use the body as the actual response
             }
-          };
-          xhr.onload = () => {
-            if (xhr.status >= 200 && xhr.status < 300) resolve();
-            else reject(new Error(`Upload failed with status ${xhr.status}`));
-          };
-          xhr.onerror = () => reject(new Error('Network error during upload'));
-          xhr.send(uploadFile);
-        });
+          }
+          
+          // Handle 202 Accepted response (async file creation)
+          if (links && typeof links === 'object' && 'status' in links && links.status === 202) {
+            console.log(`File creation returned 202 for ${cleanFileName}. File metadata creation is being processed asynchronously...`);
+            
+            // Check if we already have the links in the response body
+            const asyncResponse = links as any;
+            if (asyncResponse.body && asyncResponse.body._links && asyncResponse.body._links.uploadUrl) {
+              console.log(`Found upload links in 202 response for ${cleanFileName}, proceeding with upload`);
+              links = asyncResponse.body; // Use the body as the actual response
+            } else {
+              // Show that we're processing this file asynchronously
+              setUploadProgress(prev => ({ ...prev, [fileKey]: 0 })); // Set to 0 to show as processing
+              
+              try {
+                // For iTwin Storage API, 202 on createFile means the metadata creation is async
+                // We need to retry the createFile call until we get the actual links
+                let retryAttempts = 0;
+                const maxRetries = 20; // 20 attempts with 3 second intervals = 1 minute
+                
+                while (retryAttempts < maxRetries) {
+                  retryAttempts++;
+                  console.log(`Retrying file metadata creation for ${cleanFileName} (attempt ${retryAttempts}/${maxRetries})...`);
+                  
+                  // Wait before retrying
+                  await new Promise(resolve => setTimeout(resolve, 3000));
+                  
+                  try {
+                    const retryLinks = await storageService.createFile(currentFolderId, { displayName: cleanFileName });
+                    
+                    // Check if we got actual links this time
+                    if (retryLinks && retryLinks._links && retryLinks._links.uploadUrl) {
+                      console.log(`File metadata creation completed for ${cleanFileName} after ${retryAttempts} retries`);
+                      links = retryLinks;
+                      break; // Exit retry loop
+                    } else if (retryLinks && 'status' in retryLinks && (retryLinks as any).status === 202) {
+                      // Check if this 202 response has links in the body
+                      const retryAsyncResponse = retryLinks as any;
+                      if (retryAsyncResponse.body && retryAsyncResponse.body._links && retryAsyncResponse.body._links.uploadUrl) {
+                        console.log(`Found upload links in retry 202 response for ${cleanFileName}`);
+                        links = retryAsyncResponse.body;
+                        break;
+                      }
+                      console.log(`Still processing metadata for ${cleanFileName}... (attempt ${retryAttempts})`);
+                      continue; // Continue retrying
+                    } else {
+                      console.log(`Unexpected response for ${cleanFileName}:`, retryLinks);
+                      continue;
+                    }
+                  } catch (retryError) {
+                    console.log(`Retry error for ${cleanFileName} (attempt ${retryAttempts}):`, retryError);
+                    if (retryAttempts >= maxRetries) {
+                      throw retryError;
+                    }
+                    continue;
+                  }
+                }
+                
+                // If we exhausted retries and still don't have links
+                if (!links || !links._links || !(links as any)._links.uploadUrl) {
+                  throw new Error(`File metadata creation timed out after ${maxRetries} retries`);
+                }
+                
+              } catch (asyncError) {
+                console.error(`Async file metadata creation failed for ${cleanFileName}:`, asyncError);
+                setUploadProgress(prev => ({ ...prev, [fileKey]: -1 })); // Mark as failed
+                results.push({ 
+                  file: cleanFileName, 
+                  success: false, 
+                  error: `Async metadata creation failed: ${asyncError instanceof Error ? asyncError.message : 'Unknown error'}` 
+                });
+                continue; // Skip to next file
+              }
+            }
+          }
+          
+          // Check if links exist and have the expected structure
+          if (!links) {
+            throw new Error(`No response received for ${cleanFileName} (API returned null/undefined)`);
+          }
+          
+          if (!links._links) {
+            console.error(`Full response for ${cleanFileName}:`, JSON.stringify(links, null, 2));
+            throw new Error(`Invalid response structure for ${cleanFileName}: missing _links property. Received status: ${(links as any).status || 'unknown'}`);
+          }
+          
+          const uploadUrl = links._links.uploadUrl?.href;
+          const completeUrl = links._links.completeUrl?.href;
+          
+          // Check if this was a skipped upload (file already exists from async processing)
+          if (uploadUrl === 'SKIP_UPLOAD' && completeUrl === 'SKIP_COMPLETE') {
+            console.log(`File ${cleanFileName} already processed by server, skipping upload`);
+            setUploadProgress(prev => ({ ...prev, [fileKey]: 100 }));
+            completedFiles++;
+            continue; // Skip to next file
+          }
+          
+          if (!uploadUrl) {
+            console.error(`Missing uploadUrl for ${cleanFileName}. Available links:`, Object.keys(links._links));
+            console.error(`Full _links object:`, JSON.stringify(links._links, null, 2));
+            throw new Error(`Upload URL not provided for ${cleanFileName}. Check if file already exists or if there are permission issues.`);
+          }
+          
+          if (!completeUrl) {
+            console.error(`Missing completeUrl for ${cleanFileName}. Available links:`, Object.keys(links._links));
+            console.error(`Full _links object:`, JSON.stringify(links._links, null, 2));
+            throw new Error(`Complete URL not provided for ${cleanFileName}. Check if file already exists or if there are permission issues.`);
+          }
+          
+          console.log(`Upload URLs obtained for ${cleanFileName}:`, { uploadUrl, completeUrl });
+
+          // 2) Upload bytes: use chunked upload if file too large, else single PUT (XHR) for native progress
+          if (file.size > SINGLE_PUT_LIMIT) {
+            await uploadLargeToSas(uploadUrl, file, (pct) => {
+              setUploadProgress(prev => ({ ...prev, [fileKey]: pct }));
+            });
+          } else {
+            await new Promise<void>((resolve, reject) => {
+              const xhr = new XMLHttpRequest();
+              xhr.open('PUT', uploadUrl, true);
+              xhr.setRequestHeader('x-ms-blob-type', 'BlockBlob');
+              if (file.type) {
+                try { xhr.setRequestHeader('Content-Type', file.type); } catch { /* ignore setting content-type errors in XHR */ }
+              }
+              xhr.upload.onprogress = (evt) => {
+                if (evt.lengthComputable) {
+                  const pct = Math.round((evt.loaded / evt.total) * 100);
+                  setUploadProgress(prev => ({ ...prev, [fileKey]: pct }));
+                }
+              };
+              xhr.onload = () => {
+                if (xhr.status >= 200 && xhr.status < 300) resolve();
+                else reject(new Error(`Upload failed for ${file.name} with status ${xhr.status}`));
+              };
+              xhr.onerror = () => reject(new Error(`Network error during upload of ${file.name}`));
+              xhr.send(file);
+            });
+          }
+
+          // 3) Complete file
+          await storageService.completeByUrl(completeUrl);
+          
+          // Mark as 100% complete
+          setUploadProgress(prev => ({ ...prev, [fileKey]: 100 }));
+          completedFiles++;
+          
+        } catch (error) {
+          console.error(`Failed to upload ${file.name}:`, error);
+          setUploadProgress(prev => ({ ...prev, [fileKey]: -1 })); // Mark as failed
+        }
       }
 
-      // 3) Complete file
-      await storageService.completeByUrl(completeUrl);
-
-      // 4) Reset and refresh
-      setUploadFile(null);
-      setUploadProgress(0);
-      if (currentFolderId) await loadFolder(currentFolderId);
+      // 4) Reset and refresh if at least one file succeeded
+      if (completedFiles > 0) {
+        setUploadFiles([]);
+        setUploadProgress({});
+        if (currentFolderId) await loadFolder(currentFolderId);
+      }
+      
+      if (completedFiles < totalFiles) {
+        const failedFiles = uploadFiles.length - completedFiles;
+        const asyncFiles = Object.values(uploadProgress).filter(p => p === -1).length;
+        
+        let errorMessage = `${completedFiles} of ${totalFiles} files uploaded successfully.`;
+        
+        if (asyncFiles > 0) {
+          errorMessage += ` ${asyncFiles} files require asynchronous processing (common with large files like Revit models). These files may be processed by the server but couldn't be uploaded immediately.`;
+        }
+        
+        if (failedFiles - asyncFiles > 0) {
+          errorMessage += ` ${failedFiles - asyncFiles} files failed due to other errors.`;
+        }
+        
+        setUploadError(errorMessage);
+      }
+      
     } catch (e) {
       setUploadError(e instanceof Error ? e.message : 'Upload failed');
     } finally {
       setUploading(false);
+      setCurrentUploading(null);
     }
   };
 
@@ -402,7 +625,7 @@ export default function StorageComponent() {
               <div className="flex-1 relative">
                 <Input
                   type="text"
-                  placeholder={loadingITwins ? 'Loading…' : 'Type to search iTwins'}
+                  placeholder={loadingITwins ? 'Loading…' : 'Select or search iTwins'}
                   value={iTwinSearch}
                   onChange={e => {
                     setITwinSearch(e.target.value);
@@ -415,24 +638,55 @@ export default function StorageComponent() {
                   autoComplete="off"
                 />
                 {/* Autocomplete dropdown */}
-                {(showDropdown && !loadingITwins && iTwins.length > 0 && iTwinSearch) && (
+                {(showDropdown && !loadingITwins) && (
                   <div className="absolute z-10 bg-white border rounded shadow w-full max-h-48 overflow-auto">
-                    {iTwins.filter(t =>
+                    {/* Recent iTwins */}
+                    {!iTwinSearch && recentITwins.length > 0 && (
+                      <>
+                        <div className="px-3 py-1 text-xs font-medium text-muted-foreground bg-muted">
+                          Recent iTwins
+                        </div>
+                        {recentITwins.map(t => (
+                          <div
+                            key={`recent-${t.id}`}
+                            className="px-3 py-2 cursor-pointer hover:bg-accent flex items-center"
+                            onMouseDown={e => e.preventDefault()}
+                            onClick={() => selectITwin(t)}
+                          >
+                            <span className="flex-1">{t.displayName}</span>
+                            <span className="text-xs text-muted-foreground">({t.id.slice(0,8)}…)</span>
+                          </div>
+                        ))}
+                        {iTwins.length > 0 && (
+                          <div className="px-3 py-1 text-xs font-medium text-muted-foreground bg-muted">
+                            All iTwins (type to search)
+                          </div>
+                        )}
+                      </>
+                    )}
+                    
+                    {/* Search results */}
+                    {iTwinSearch && iTwins.filter(t =>
                       t.displayName.toLowerCase().includes(iTwinSearch.toLowerCase())
                     ).map(t => (
                       <div
                         key={t.id}
                         className="px-3 py-2 cursor-pointer hover:bg-accent"
                         onMouseDown={e => e.preventDefault()}
-                        onClick={() => {
-                          setSelectedITwinId(t.id);
-                          setITwinSearch(t.displayName);
-                          setShowDropdown(false);
-                        }}
+                        onClick={() => selectITwin(t)}
                       >
                         {t.displayName} <span className="text-xs text-muted-foreground">({t.id.slice(0,8)}…)</span>
                       </div>
                     ))}
+                    
+                    {/* No results */}
+                    {iTwinSearch && iTwins.filter(t =>
+                      t.displayName.toLowerCase().includes(iTwinSearch.toLowerCase())
+                    ).length === 0 && (
+                      <div className="px-3 py-2 text-muted-foreground text-sm">
+                        No iTwins found matching "{iTwinSearch}"
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -468,22 +722,93 @@ export default function StorageComponent() {
             <div className="space-y-2">
               <Label>Upload file</Label>
               <div className="flex flex-col gap-2">
-                <Input type="file" onChange={(e)=> setUploadFile(e.target.files?.[0] ?? null)} disabled={uploading || !currentFolderId} />
+                <Input 
+                  type="file" 
+                  multiple 
+                  onChange={(e) => {
+                    const files = Array.from(e.target.files || []);
+                    setUploadFiles(files);
+                    setUploadProgress({});
+                    setUploadError(null);
+                  }} 
+                  disabled={uploading || !currentFolderId} 
+                />
                 <div className="flex items-center gap-2">
-                  <Button onClick={onUploadSelectedFile} disabled={!uploadFile || uploading || !currentFolderId}>
+                  <Button onClick={onUploadSelectedFiles} disabled={uploadFiles.length === 0 || uploading || !currentFolderId}>
                     {uploading && <Loader2 className="h-4 w-4 mr-2 animate-spin"/>}
-                    {uploading ? 'Uploading…' : 'Upload'}
+                    {uploading ? `Uploading (${Object.keys(uploadProgress).length}/${uploadFiles.length})…` : `Upload ${uploadFiles.length} file${uploadFiles.length !== 1 ? 's' : ''}`}
                   </Button>
-                  {uploadFile && !uploading && (
-                    <span className="text-xs text-muted-foreground">{uploadFile.name} ({formatBytes(uploadFile.size)})</span>
+                  {uploadFiles.length > 0 && !uploading && (
+                    <>
+                      <span className="text-xs text-muted-foreground">
+                        {uploadFiles.length} file{uploadFiles.length !== 1 ? 's' : ''} selected 
+                        ({formatBytes(uploadFiles.reduce((total, file) => total + file.size, 0))})
+                      </span>
+                      <Button 
+                        variant="outline" 
+                        size="sm" 
+                        onClick={() => {
+                          setUploadFiles([]);
+                          setUploadProgress({});
+                          setUploadError(null);
+                        }}
+                      >
+                        Clear
+                      </Button>
+                    </>
                   )}
                 </div>
-                {uploading && (
-                  <div className="flex items-center gap-2">
-                    <div className="h-2 w-full bg-muted rounded overflow-hidden">
-                      <div className="h-full bg-primary" style={{ width: `${uploadProgress}%` }} />
+                {uploading && uploadFiles.length > 0 && (
+                  <div className="space-y-2">
+                    {uploadFiles.map((file) => {
+                      const fileKey = `${file.name}-${file.size}`;
+                      const progress = uploadProgress[fileKey] || 0;
+                      const isCurrentlyUploading = currentUploading === fileKey;
+                      const isFailed = progress === -1;
+                      const isCompleted = progress === 100;
+                      const isAsyncProcessing = progress === 0 && isCurrentlyUploading; // 0 progress with current uploading means async processing
+                      
+                      return (
+                        <div key={fileKey} className="space-y-1">
+                          <div className="flex justify-between items-center text-xs">
+                            <span className={`${isFailed ? 'text-red-600' : isCompleted ? 'text-green-600' : isAsyncProcessing ? 'text-yellow-600' : 'text-foreground'}`}>
+                              {file.name} ({formatBytes(file.size)})
+                              {isAsyncProcessing && <span className="ml-1 text-yellow-600">processing on server...</span>}
+                              {isCurrentlyUploading && !isAsyncProcessing && <span className="ml-1 text-blue-600">uploading...</span>}
+                              {isFailed && <span className="ml-1 text-red-600">failed</span>}
+                              {isCompleted && <span className="ml-1 text-green-600">✓</span>}
+                            </span>
+                            <span className="text-muted-foreground min-w-[32px] text-right">
+                              {isFailed ? 'Failed' : isAsyncProcessing ? 'Processing...' : `${progress}%`}
+                            </span>
+                          </div>
+                          <div className="h-2 w-full bg-muted rounded overflow-hidden">
+                            <div 
+                              className={`h-full transition-all duration-300 ${
+                                isFailed ? 'bg-red-500' : 
+                                isCompleted ? 'bg-green-500' : 
+                                isAsyncProcessing ? 'bg-yellow-500 animate-pulse' : 
+                                'bg-primary'
+                              }`} 
+                              style={{ width: isAsyncProcessing ? '100%' : `${Math.max(0, progress)}%` }} 
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {!uploading && uploadFiles.length > 0 && (
+                  <div className="space-y-1">
+                    <div className="text-xs text-muted-foreground">Selected files:</div>
+                    <div className="max-h-32 overflow-y-auto space-y-1">
+                      {uploadFiles.map((file, index) => (
+                        <div key={`${file.name}-${index}`} className="text-xs text-foreground flex justify-between">
+                          <span>{file.name}</span>
+                          <span className="text-muted-foreground">{formatBytes(file.size)}</span>
+                        </div>
+                      ))}
                     </div>
-                    <span className="text-xs text-muted-foreground min-w-[32px] text-right">{uploadProgress}%</span>
                   </div>
                 )}
                 {uploadError && <p className="text-xs text-red-600">{uploadError}</p>}
