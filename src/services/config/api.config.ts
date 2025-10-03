@@ -67,7 +67,7 @@ export const API_CONFIG = {
       // Storage Connections
       STORAGE_CONNECTIONS: '/synchronization/imodels/storageconnections',
       STORAGE_CONNECTION_SOURCEFILES: (connectionId: string) => `/synchronization/imodels/storageconnections/${connectionId}/sourcefiles`,
-      STORAGE_CONNECTION_RUN: (connectionId: string) => `/synchronization/imodels/storageconnections/${connectionId}/runs`,
+      STORAGE_CONNECTION_RUN: (connectionId: string) => `/synchronization/imodels/storageconnections/${connectionId}/run`,
       STORAGE_CONNECTION_RUNS: (connectionId: string) => `/synchronization/imodels/storageconnections/${connectionId}/runs`,
       STORAGE_CONNECTION_RUN_ITEM: (connectionId: string, runId: string) => `/synchronization/imodels/storageconnections/${connectionId}/runs/${runId}`,
     },

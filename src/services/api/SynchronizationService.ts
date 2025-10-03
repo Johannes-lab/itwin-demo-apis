@@ -75,7 +75,10 @@ class SynchronizationService extends BaseAPIClient {
 
   async runStorageConnection(connectionId: string): Promise<Response> {
     const token = await (await import('../AuthService')).authService.getAccessToken();
-    const res = await fetch(`${API_CONFIG.BASE_URL}${API_CONFIG.ENDPOINTS.SYNCHRONIZATION.STORAGE_CONNECTION_RUN(connectionId)}`, {
+    const url = `${API_CONFIG.BASE_URL}${API_CONFIG.ENDPOINTS.SYNCHRONIZATION.STORAGE_CONNECTION_RUN(connectionId)}`;
+    console.log('Attempting to run storage connection with URL:', url);
+    console.log('Connection ID:', connectionId);
+    const res = await fetch(url, {
       method: 'POST',
       headers: { Accept: API_CONFIG.DEFAULT_HEADERS.Accept, Authorization: `${token}` },
       redirect: 'manual',
