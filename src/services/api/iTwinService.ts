@@ -1,11 +1,27 @@
 import { BaseAPIClient } from "../base/BaseAPIClient";
 import { API_CONFIG } from "../config/api.config";
-import type { iTwin, iTwinsResponse } from "../types";
+import type { IModel, iTwin, iTwinsResponse } from "../types";
 
 export class iTwinService extends BaseAPIClient {
   // Simple in-memory cache and in-flight de-duplication across the app lifetime
-  private static cache: { data: iTwin[] | null; expiresAt: number } | null = null;
+  private static cache: { data: iTwin[] | null; expiresAt: number } | null =
+    null;
   private static inflight: Promise<iTwin[] | null> | null = null;
+  config: any;
+
+  async updateIModel(
+    iModelId: string,
+    data: { displayName?: string; description?: string }
+  ): Promise<IModel> {
+    const response = await this.fetch<{ iModel: IModel }>(
+      this.config.IMODEL_DETAIL.replace("{id}", iModelId),
+      {
+        method: "PATCH",
+        body: JSON.stringify(data),
+      }
+    );
+    return response.iModel;
+  }
 
   public async getMyiTwins(): Promise<iTwin[] | null> {
     try {
@@ -21,10 +37,12 @@ export class iTwinService extends BaseAPIClient {
       }
 
       let allTwins: iTwin[] = [];
-      let nextUrl: string | null = `${API_CONFIG.ENDPOINTS.ITWINS}?includeInactive=true`;
+      let nextUrl:
+        | string
+        | null = `${API_CONFIG.ENDPOINTS.ITWINS}?includeInactive=true`;
 
       while (nextUrl) {
-  const data: iTwinsResponse = await this.fetch(nextUrl, {
+        const data: iTwinsResponse = await this.fetch(nextUrl, {
           headers: {
             Prefer: "return=representation",
           },

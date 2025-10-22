@@ -1,5 +1,5 @@
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
-import { FileType, Loader2, Database, X, Plus, Folder, ArrowUp, ChevronRight, Info } from 'lucide-react';
+import { FileType, Loader2, Database, X, Plus, Folder, ArrowUp, ChevronRight } from 'lucide-react';
 import { useEffect, useState, useRef } from 'react';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
@@ -9,7 +9,6 @@ import { iTwinApiService, synchronizationService, storageService } from '../serv
 import { iModelApiService } from '../services/api';
 import type { iTwin } from '../services/iTwinAPIService';
 import type { ManifestConnection } from '../services/types';
-import type { StorageFile } from '../services/types/storage.types';
 import type { CreateIModelRequest } from '../services/types/imodel.types';
 
 export default function SynchronizationComponent() {
@@ -33,7 +32,6 @@ export default function SynchronizationComponent() {
   const [storageIModelSearch, setStorageIModelSearch] = useState('');
   const [storageShowIModelDropdown, setStorageShowIModelDropdown] = useState(false);
   const [storageDisplayName, setStorageDisplayName] = useState('');
-  const [storageFileId, setStorageFileId] = useState('');
   const [connectorType, setConnectorType] = useState('DGN');
   const [creatingStorageConnection, setCreatingStorageConnection] = useState(false);
   const [createdStorageConnection, setCreatedStorageConnection] = useState<any>(null);
@@ -220,7 +218,6 @@ export default function SynchronizationComponent() {
 
   const confirmMultiSelection = () => {
     if (selectedStorageFiles.length > 0) {
-      setStorageFileId(selectedStorageFiles[0].id);
       setStorageBrowserOpen(false);
     }
   };
@@ -457,7 +454,6 @@ export default function SynchronizationComponent() {
                       onClick={() => {
                         setSelectedITwinId('');
                         setStorageITwinSearch('');
-                        setStorageFileId('');
                         setSelectedStorageFiles([]);
                         setStorageShowITwinDropdown(false);
                         setStorageIModels([]);
@@ -471,45 +467,43 @@ export default function SynchronizationComponent() {
                   )}
                   {storageShowITwinDropdown && !iTwinsLoading && (
                     <div className="absolute z-10 w-full mt-1 bg-background border rounded-md shadow-lg max-h-60 overflow-auto">
-                      {/* Recent iTwins Section */}
-                      {getRecentITwins().length > 0 && (
+                      {/* Recent iTwins Section - only show when no search term */}
+                      {!storageITwinSearch && getRecentITwins().length > 0 && (
                         <>
                           <div className="px-3 py-2 text-xs font-medium text-muted-foreground bg-muted/50 border-b">
                             Recent iTwins
                           </div>
-                          {getRecentITwins()
-                            .filter((recentITwin: iTwin) => 
-                              recentITwin.displayName.toLowerCase().includes(storageITwinSearch.toLowerCase()) ||
-                              recentITwin.id.toLowerCase().includes(storageITwinSearch.toLowerCase())
-                            )
-                            .map((recentITwin: iTwin) => (
-                              <div
-                                key={`recent-${recentITwin.id}`}
-                                className="px-3 py-2 hover:bg-muted cursor-pointer text-sm border-b border-border/20"
-                                onClick={() => {
-                                  setSelectedITwinId(recentITwin.id);
-                                  setStorageITwinSearch(`${recentITwin.displayName} (${recentITwin.id.slice(0,8)}…)`);
-                                  setStorageShowITwinDropdown(false);
-                                  loadIModels(recentITwin.id);
-                                }}
-                              >
-                                <div className="font-medium">{recentITwin.displayName}</div>
-                                <div className="text-xs text-muted-foreground">{recentITwin.id}</div>
-                              </div>
-                            ))}
-                          <div className="px-3 py-2 text-xs font-medium text-muted-foreground bg-muted/50 border-b">
-                            All iTwins
-                          </div>
+                          {getRecentITwins().map((recentITwin: iTwin) => (
+                            <div
+                              key={`recent-${recentITwin.id}`}
+                              className="px-3 py-2 hover:bg-muted cursor-pointer text-sm border-b border-border/20"
+                              onClick={() => {
+                                setSelectedITwinId(recentITwin.id);
+                                setStorageITwinSearch(`${recentITwin.displayName} (${recentITwin.id.slice(0,8)}…)`);
+                                setStorageShowITwinDropdown(false);
+                                loadIModels(recentITwin.id);
+                              }}
+                            >
+                              <div className="font-medium">{recentITwin.displayName}</div>
+                              <div className="text-xs text-muted-foreground">{recentITwin.id}</div>
+                            </div>
+                          ))}
+                          {iTwins.length > 0 && (
+                            <div className="px-3 py-2 text-xs font-medium text-muted-foreground bg-muted/50 border-b">
+                              All iTwins (type to search)
+                            </div>
+                          )}
                         </>
                       )}
                       
-                      {/* All iTwins */}
+                      {/* All iTwins - filtered when searching, limited when not */}
                       {iTwins
                         .filter(t => 
+                          !storageITwinSearch || 
                           t.displayName.toLowerCase().includes(storageITwinSearch.toLowerCase()) ||
                           t.id.toLowerCase().includes(storageITwinSearch.toLowerCase())
                         )
-                        .slice(0, 20)
+                        .slice(0, storageITwinSearch ? 20 : 10) // Show fewer when not searching
                         .map(t => (
                           <div
                             key={t.id}
@@ -526,6 +520,17 @@ export default function SynchronizationComponent() {
                             <div className="text-xs text-muted-foreground">{t.id}</div>
                           </div>
                         ))}
+                      
+                      {/* No results message */}
+                      {storageITwinSearch && iTwins.filter(t => 
+                        t.displayName.toLowerCase().includes(storageITwinSearch.toLowerCase()) ||
+                        t.id.toLowerCase().includes(storageITwinSearch.toLowerCase())
+                      ).length === 0 && (
+                        <div className="px-3 py-2 text-sm text-muted-foreground">
+                          No iTwins found matching "{storageITwinSearch}"
+                        </div>
+                      )}
+                      
                       {iTwins.length === 0 && !storageITwinSearch && (
                         <div className="px-3 py-2 text-sm text-muted-foreground">
                           No iTwins available

@@ -17,11 +17,15 @@ function isFile(item: StorageListItem): item is StorageFile & { type: 'file' } {
   return item.type === 'file';
 }
 
-export default function StorageComponent() {
+interface StorageComponentProps {
+  preselectedITwinId?: string;
+}
+
+export default function StorageComponent({ preselectedITwinId }: StorageComponentProps) {
 
   // iTwin search and selection
   const [iTwins, setITwins] = useState<iTwin[]>([]);
-  const [selectedITwinId, setSelectedITwinId] = useState("");
+  const [selectedITwinId, setSelectedITwinId] = useState(preselectedITwinId || "");
   const [iTwinSearch, setITwinSearch] = useState("");
   const [showDropdown, setShowDropdown] = useState(false);
   const [loadingITwins, setLoadingITwins] = useState(false);
@@ -105,20 +109,30 @@ export default function StorageComponent() {
     }
   };
 
-  // Load iTwins on mount
+  // Load iTwins on mount and handle preselected iTwin
   useEffect(() => {
     const load = async () => {
       try {
         setLoadingITwins(true); setError(null);
         const data = await iTwinApiService.getMyiTwins();
-        setITwins(Array.isArray(data) ? data : []);
+        const iTwinsList = Array.isArray(data) ? data : [];
+        setITwins(iTwinsList);
+        
+        // If preselectedITwinId is provided, find and select the iTwin
+        if (preselectedITwinId && iTwinsList.length > 0) {
+          const preselectedITwin = iTwinsList.find(t => t.id === preselectedITwinId);
+          if (preselectedITwin) {
+            setITwinSearch(preselectedITwin.displayName);
+            addToRecentITwins(preselectedITwin);
+          }
+        }
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to load iTwins');
       } finally { setLoadingITwins(false); }
     };
     load();
     loadRecentITwins(); // Load recent iTwins from localStorage
-  }, []);
+  }, [preselectedITwinId]);
 
   // Auto-load storage when iTwin is selected
   useEffect(() => {
