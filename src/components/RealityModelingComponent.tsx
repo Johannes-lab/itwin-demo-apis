@@ -1,10 +1,12 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { toast } from 'sonner';
 type BaseCategory = 'CCImageCollection' | 'CCOrientations' | 'ScanCollection';
 const CATEGORY_BASE_TYPES: readonly BaseCategory[] = ['CCImageCollection','CCOrientations','ScanCollection'];
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
-import { AlertTriangle, RefreshCw, Layers, Plus, Loader2 } from 'lucide-react';
+import { AlertTriangle, RefreshCw, Layers, Plus, Loader2, ImagePlus, UploadCloud, FileCog, Link2 } from 'lucide-react';
+import { buildOrientationsXml, buildOrientationsZip } from '../lib/orientations';
 import { realityManagementService, realityModelingService, iTwinApiService } from '../services';
 import type { RealityDataSummary, RealityDataListResponse, RealityDataListParams, Workspace, Job, iTwin } from '../services/types';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from './ui/dialog';
@@ -88,6 +90,58 @@ const OrientationSelect: React.FC<OrientationSelectProps> = ({ items, loading, v
 type CategoryFilter = 'ALL' | BaseCategory | 'RECONSTRUCTIONS';
 
 const RealityModelingComponent: React.FC = () => {
+  // Global iTwin selection (for filtering Reality Data list & preselecting reconstruction workflow)
+  const [iTwins, setITwins] = useState<iTwin[]>([]);
+  const [iTwinsLoading, setITwinsLoading] = useState(false);
+  const [selectedITwinId, setSelectedITwinId] = useState<string>('');
+  const [iTwinSearch, setITwinSearch] = useState<string>('');
+  const [showITwinDropdown, setShowITwinDropdown] = useState(false);
+  const [recentITwins, setRecentITwins] = useState<iTwin[]>([]);
+
+  // Recent iTwins utilities (localStorage shared pattern but separate key for Reality page)
+  const RECENT_REALITY_ITWINS_KEY = 'reality-recent-itwins';
+  const loadRecentITwins = () => {
+    try {
+      const stored = localStorage.getItem(RECENT_REALITY_ITWINS_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored) as iTwin[];
+        setRecentITwins(parsed.slice(0, 5));
+      }
+    } catch (e) {
+      console.warn('Failed to load recent reality iTwins', e);
+    }
+  };
+  const addToRecentITwins = (tw: iTwin) => {
+    try {
+      const current = recentITwins.filter(r => r.id !== tw.id);
+      const updated = [tw, ...current].slice(0, 5);
+      setRecentITwins(updated);
+      localStorage.setItem(RECENT_REALITY_ITWINS_KEY, JSON.stringify(updated));
+    } catch (e) {
+      console.warn('Failed to save recent reality iTwin', e);
+    }
+  };
+
+  const loadGlobalITwins = async () => {
+    setITwinsLoading(true);
+    try {
+      const data = await iTwinApiService.getMyiTwins();
+      if (data) setITwins(data);
+    } catch (e) {
+      console.error('Failed to load iTwins for Reality Data page', e);
+    } finally {
+      setITwinsLoading(false);
+    }
+  };
+
+  const selectGlobalITwin = (tw: iTwin) => {
+    setSelectedITwinId(tw.id);
+    setITwinSearch(`${tw.displayName} (${tw.id.slice(0,8)}…)`);
+    addToRecentITwins(tw);
+    setShowITwinDropdown(false);
+    loadRealityData({ reset: true });
+  };
+
   const [items, setItems] = useState<RealityDataSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -103,6 +157,7 @@ const RealityModelingComponent: React.FC = () => {
       if (types) params.types = types;
       params.$top = TOP;
       if (opts?.token) params.continuationToken = opts.token;
+      if (selectedITwinId) params.iTwinId = selectedITwinId; // filter by selected iTwin if chosen
 
       const res = await realityManagementService.listRealityData(params);
       const data: RealityDataListResponse = res;
@@ -118,9 +173,21 @@ const RealityModelingComponent: React.FC = () => {
   };
 
   useEffect(() => {
-    loadRealityData({ reset: true });
+    loadRecentITwins();
+    loadGlobalITwins().then(() => {
+      // initial load after iTwins fetched (selectedITwinId might already be set if user previously navigated back)
+      loadRealityData({ reset: true });
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // when selected iTwin changes, reload (types/category already considered)
+  useEffect(() => {
+    if (selectedITwinId) {
+      loadRealityData({ reset: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedITwinId]);
 
   const displayItems = useMemo(() => {
     if (categoryFilter === 'RECONSTRUCTIONS') {
@@ -140,13 +207,10 @@ const RealityModelingComponent: React.FC = () => {
 
   const canLoadMore = Boolean(continuationToken);
 
-  //Reconstruction workflow
+  // Reconstruction workflow (uses selectedITwinId from global selector if present)
   const [newReconOpen, setNewReconOpen] = useState(false);
   const [step, setStep] = useState<1|2|3|4>(1); //1 workspace, 2 job config, 3 review+submit, 4 progress
   const [workspaceName, setWorkspaceName] = useState('');
-  const [iTwins, setITwins] = useState<iTwin[]>([]);
-  const [iTwinsLoading, setITwinsLoading] = useState(false);
-  const [selectedITwinId, setSelectedITwinId] = useState('');
   const [createdWorkspace, setCreatedWorkspace] = useState<Workspace | null>(null);
   const [jobName, setJobName] = useState('');
   const [availableImageCollections, setAvailableImageCollections] = useState<RealityDataSummary[]>([]);
@@ -169,6 +233,320 @@ const RealityModelingComponent: React.FC = () => {
   const [progressState, setProgressState] = useState<string>('');
   const [progressStep, setProgressStep] = useState<string>('');
   const [progressError, setProgressError] = useState<string | null>(null);
+
+  // New Image Collection creation state
+  const [newICOpen, setNewICOpen] = useState(false);
+  const [newICName, setNewICName] = useState('');
+  const [creatingIC, setCreatingIC] = useState(false);
+  const [icError, setICError] = useState<string | null>(null);
+  // New CCOrientations creation state
+  const [newCOOpen, setNewCOOpen] = useState(false);
+  const [newCOName, setNewCOName] = useState('');
+  const [coFile, setCOFile] = useState<File | null>(null);
+  const [creatingCO, setCreatingCO] = useState(false);
+  const [coError, setCOError] = useState<string | null>(null);
+  // Auto-generate CCOrientations from Image Collection
+  const [genCOOpen, setGenCOOpen] = useState(false);
+  const [genTargetIC, setGenTargetIC] = useState<RealityDataSummary | null>(null);
+  const [genLoadingImages, setGenLoadingImages] = useState(false);
+  const [genImages, setGenImages] = useState<string[]>([]);
+  const [genBlockName, setGenBlockName] = useState('Generated Block');
+  const [genCreating, setGenCreating] = useState(false);
+  const [genError, setGenError] = useState<string | null>(null);
+  const [genCOId, setGenCOId] = useState<string>('');
+
+  const resetICForm = () => { setNewICName(''); setICError(null); };
+  const resetCOForm = () => { setNewCOName(''); setCOFile(null); setCOError(null); };
+
+  const submitCreateImageCollection = async () => {
+    if (!selectedITwinId || !newICName.trim()) { setICError('iTwin and name required'); return; }
+    setCreatingIC(true); setICError(null);
+    try {
+      const created = await realityManagementService.createRealityData({
+        iTwinId: selectedITwinId,
+        displayName: newICName.trim(),
+        type: 'CCImageCollection',
+        classification: 'Undefined'
+      });
+      if (created) {
+        setNewICOpen(false);
+        resetICForm();
+        // reload list filtered by iTwin
+        loadRealityData({ reset: true });
+      } else {
+        setICError('Creation failed');
+      }
+    } catch (e:any) {
+      setICError(e.message || 'Unexpected error');
+    } finally { setCreatingIC(false); }
+  };
+
+  const submitCreateCCOrientations = async () => {
+    if (!selectedITwinId) { setCOError('Select an iTwin first'); return; }
+    if (!newCOName.trim()) { setCOError('Display name required'); return; }
+    if (!coFile) { setCOError('Orientation file required'); return; }
+    setCreatingCO(true); setCOError(null);
+    try {
+      const created = await realityManagementService.createRealityData({
+        iTwinId: selectedITwinId,
+        displayName: newCOName.trim(),
+        type: 'CCOrientations',
+        classification: 'Undefined'
+      });
+      if (!created) { setCOError('Creation failed'); return; }
+      toast.success('CCOrientations created', { description: created.id });
+      // Get write access and upload the single orientations file
+      const access = await realityManagementService.getRealityDataWriteAccess(selectedITwinId, created.id);
+      if (!access?.containerUrl) { setCOError('Write access failed'); toast.error('Write access failed'); return; }
+      // Build upload URL (reuse logic similar to images)
+      let targetUrl: string;
+      try {
+        const u = new URL(access.containerUrl);
+        const path = u.pathname.endsWith('/') ? u.pathname : u.pathname + '/';
+        // If user file name doesn't look json, keep original; server conventions may expect orientations.json
+        const desiredName = coFile.name.endsWith('.json') ? coFile.name : coFile.name;
+        u.pathname = path + encodeURIComponent(desiredName);
+        targetUrl = u.toString();
+      } catch {
+        const [b, q] = access.containerUrl.split('?');
+        targetUrl = `${b.replace(/\/$/, '')}/${encodeURIComponent(coFile.name)}${q ? `?${q}` : ''}`;
+      }
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', targetUrl, true);
+        xhr.setRequestHeader('x-ms-blob-type','BlockBlob');
+        if (coFile.type) try { xhr.setRequestHeader('Content-Type', coFile.type); } catch {}
+        xhr.onerror = () => reject(new Error('Network error uploading orientations'));
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) resolve(); else reject(new Error('Upload failed ' + xhr.status));
+        };
+        xhr.send(coFile);
+      });
+      toast.success('Orientations uploaded', { description: 'File stored successfully.' });
+      // Refresh list and close
+      loadRealityData({ reset: true });
+      setNewCOOpen(false); resetCOForm();
+    } catch (e:any) {
+      const msg = e.message || 'Unexpected error';
+      setCOError(msg);
+      toast.error('CCOrientations error', { description: msg });
+    } finally {
+      setCreatingCO(false);
+    }
+  };
+
+  const openGenerateCO = async (ic: RealityDataSummary) => {
+    if (!selectedITwinId) { toast.error('Select iTwin first'); return; }
+    setGenTargetIC(ic);
+    setGenImages([]); setGenError(null); setGenCOId('');
+    setGenCOOpen(true);
+    // Obtain list of images via write access listing (read access might differ; reuse write for simplicity)
+    setGenLoadingImages(true);
+    try {
+      const access = await realityManagementService.getRealityDataWriteAccess(selectedITwinId, ic.id);
+      if (!access?.containerUrl) throw new Error('Write access failed');
+      // List container
+      const hasQuery = access.containerUrl.includes('?');
+      const listUrl = access.containerUrl + (hasQuery ? '&' : '?') + 'restype=container&comp=list';
+      const res = await fetch(listUrl);
+      if (!res.ok) throw new Error('List failed ' + res.status);
+      const xml = await res.text();
+      const names: string[] = [];
+      const blobRegex = /<Blob>(.*?)<\/Blob>/gs; let m: RegExpExecArray | null;
+      while ((m = blobRegex.exec(xml))) {
+        const seg = m[1];
+        const nameMatch = /<Name>(.*?)<\/Name>/s.exec(seg);
+        if (nameMatch) {
+          const name = nameMatch[1];
+          if (/\.(jpe?g|png|tif|tiff|bmp)$/i.test(name)) names.push(name.split('/').pop() || name);
+        }
+      }
+      if (names.length === 0) setGenError('No image files found in collection container.');
+      setGenImages(names);
+    } catch (e:any) {
+      setGenError(e.message || 'Failed to list images');
+    } finally {
+      setGenLoadingImages(false);
+    }
+  };
+
+  const generateOrientations = async () => {
+    if (!genTargetIC || !selectedITwinId) return;
+    if (genImages.length === 0) { setGenError('No images to reference'); return; }
+    setGenCreating(true); setGenError(null);
+    try {
+      // Create CCOrientations reality data first
+      const created = await realityManagementService.createRealityData({
+        iTwinId: selectedITwinId,
+        displayName: `${genTargetIC.displayName || genTargetIC.id}-CO`,
+        type: 'CCOrientations',
+        classification: 'Undefined'
+      });
+      if (!created) throw new Error('Creation failed');
+      setGenCOId(created.id);
+      // Build XML referencing all images
+      const xml = buildOrientationsXml(genTargetIC.id, genImages, { blockName: genBlockName });
+      const zipBlob = await buildOrientationsZip(xml);
+      const access = await realityManagementService.getRealityDataWriteAccess(selectedITwinId, created.id);
+      if (!access?.containerUrl) throw new Error('Write access for orientations failed');
+      // Upload Orientations.xmlz
+      let targetUrl: string;
+      try {
+        const u = new URL(access.containerUrl);
+        const p = u.pathname.endsWith('/') ? u.pathname : u.pathname + '/';
+        u.pathname = p + 'Orientations.xmlz';
+        targetUrl = u.toString();
+      } catch {
+        const [b,q] = access.containerUrl.split('?');
+        targetUrl = `${b.replace(/\/$/,'')}/Orientations.xmlz${q?`?${q}`:''}`;
+      }
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', targetUrl, true);
+        xhr.setRequestHeader('x-ms-blob-type','BlockBlob');
+        xhr.onload = () => { if (xhr.status>=200 && xhr.status<300) resolve(); else reject(new Error('Upload failed '+xhr.status)); };
+        xhr.onerror = () => reject(new Error('Network error uploading Orientations.xmlz'));
+        xhr.send(zipBlob);
+      });
+      toast.success('Generated CCOrientations', { description: created.id });
+      loadRealityData({ reset: true });
+    } catch (e:any) {
+      const msg = e.message || 'Generation failed';
+      setGenError(msg);
+      toast.error('Generation error', { description: msg });
+    } finally {
+      setGenCreating(false);
+    }
+  };
+
+  // Upload images to image collection
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [uploadTarget, setUploadTarget] = useState<RealityDataSummary | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [containerUrl, setContainerUrl] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [containerListing, setContainerListing] = useState<{ name:string; size:number }[]>([]);
+  const [listingLoading, setListingLoading] = useState(false);
+  const [listingError, setListingError] = useState<string | null>(null);
+
+  const loadContainerListing = useCallback(async () => {
+    if (!containerUrl) return;
+    setListingLoading(true); setListingError(null);
+    try {
+      // Azure Blob list: append restype=container&comp=list preserving SAS query
+      const hasQuery = containerUrl.includes('?');
+      const listUrl = containerUrl + (hasQuery ? '&' : '?') + 'restype=container&comp=list';
+      const res = await fetch(listUrl);
+      if (!res.ok) throw new Error('List failed ' + res.status);
+      const xml = await res.text();
+      const items: { name:string; size:number }[] = [];
+      const blobRegex = /<Blob>(.*?)<\/Blob>/gs;
+      let match: RegExpExecArray | null;
+      while ((match = blobRegex.exec(xml))) {
+        const segment = match[1];
+        const nameMatch = /<Name>(.*?)<\/Name>/s.exec(segment);
+        const sizeMatch = /<Content-Length>(.*?)<\/Content-Length>/s.exec(segment);
+        if (nameMatch) {
+          items.push({ name: nameMatch[1], size: sizeMatch ? parseInt(sizeMatch[1],10) : 0 });
+        }
+      }
+      setContainerListing(items);
+    } catch (e:any) {
+      setListingError(e.message || 'Failed to list');
+    } finally {
+      setListingLoading(false);
+    }
+  }, [containerUrl]);
+
+  const openUploadDialog = async (rd: RealityDataSummary) => {
+    if (!selectedITwinId) { setUploadError('Select an iTwin filter first.'); return; }
+    setUploadTarget(rd);
+    setSelectedFiles([]);
+    setUploadProgress({});
+    setUploadError(null);
+    setContainerUrl(null);
+    setContainerListing([]);
+    setListingError(null);
+    setUploadOpen(true);
+    // Fetch write access immediately
+    const access = await realityManagementService.getRealityDataWriteAccess(selectedITwinId, rd.id);
+    if (access?.containerUrl) {
+      setContainerUrl(access.containerUrl);
+      toast.success('Write access ready', { description: 'Select images to upload.' });
+      loadContainerListing();
+    } else {
+      setUploadError('Failed to obtain write access URL (404 or unsupported type)');
+      toast.error('Write access failed', { description: 'Could not obtain SAS URL.' });
+    }
+  };
+
+  const onSelectFiles = (files: FileList | null) => {
+    if (!files) return;
+    setSelectedFiles(Array.from(files));
+  };
+
+  const uploadAll = async () => {
+    if (!containerUrl || selectedFiles.length === 0) return;
+    setUploading(true); setUploadError(null);
+    try {
+      let successCount = 0;
+      for (const file of selectedFiles) {
+        // Correctly insert filename BEFORE SAS query string (previous logic placed filename after query causing 403)
+        let fileUrl: string;
+        try {
+          const urlObj = new URL(containerUrl);
+          const path = urlObj.pathname.endsWith('/') ? urlObj.pathname : urlObj.pathname + '/';
+          // Avoid double-encoding forward slashes; encode only filename
+          urlObj.pathname = path + encodeURIComponent(file.name);
+          fileUrl = urlObj.toString();
+        } catch {
+          // Fallback (should not happen): naive split on '?' preserving query
+            const [base, qs] = containerUrl.split('?');
+            fileUrl = `${base.replace(/\/$/, '')}/${encodeURIComponent(file.name)}${qs ? `?${qs}` : ''}`;
+        }
+
+        // Use XMLHttpRequest for progress (simpler than streaming fetch here)
+        await new Promise<void>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+            xhr.open('PUT', fileUrl, true);
+            xhr.setRequestHeader('x-ms-blob-type','BlockBlob'); // Azure style; harmless if not Azure
+            // Content-Type helps some viewers and may be required for certain processing
+            if (file.type) try { xhr.setRequestHeader('Content-Type', file.type); } catch {}
+            xhr.upload.onprogress = (e) => {
+              if (e.lengthComputable) {
+                setUploadProgress(prev => ({ ...prev, [file.name]: Math.round((e.loaded / e.total) * 100) }));
+              }
+            };
+            xhr.onerror = () => reject(new Error('Network error uploading ' + file.name));
+            xhr.onload = () => {
+              if (xhr.status >= 200 && xhr.status < 300) {
+                setUploadProgress(prev => ({ ...prev, [file.name]: 100 }));
+                successCount++;
+                resolve();
+              } else {
+                let msg = `Upload failed (${xhr.status}) for ${file.name}`;
+                if (xhr.status === 403) {
+                  msg += ' - SAS token may have expired or URL malformed.';
+                }
+                reject(new Error(msg));
+              }
+            };
+            xhr.send(file);
+        });
+      }
+      loadRealityData({ reset: true });
+      await loadContainerListing();
+      toast.success('Upload complete', { description: `${successCount} file(s) uploaded.` });
+    } catch (e:any) {
+      setUploadError(e.message || 'Upload failed');
+      toast.error('Upload error', { description: e.message });
+    } finally {
+      setUploading(false);
+    }
+  };
 
   const resetWorkflow = useCallback(() => {
     setStep(1);
@@ -325,10 +703,81 @@ const RealityModelingComponent: React.FC = () => {
           <Button onClick={() => loadRealityData({ reset: true })} disabled={loading} variant="outline">
             <RefreshCw className="mr-2 h-4 w-4" /> Refresh
           </Button>
+          <Button variant="outline" onClick={()=>{ resetICForm(); setNewICOpen(true); }} disabled={iTwinsLoading}>
+            <ImagePlus className="mr-2 h-4 w-4" /> New Image Collection
+          </Button>
           <Button onClick={openNewRecon}>
             <Plus className="mr-2 h-4 w-4" /> New Reconstruction
           </Button>
         </div>
+      </div>
+
+      {/* Global iTwin selector */}
+      <div className="space-y-2">
+        <Label htmlFor="global-itwin">Filter by iTwin (optional)</Label>
+        <div className="relative">
+          <Input
+            id="global-itwin"
+            placeholder={iTwinsLoading ? 'Loading iTwins…' : 'Search or select an iTwin'}
+            value={iTwinSearch}
+            onChange={e => { setITwinSearch(e.target.value); setShowITwinDropdown(true); setSelectedITwinId(''); }}
+            onFocus={() => setShowITwinDropdown(true)}
+            onBlur={() => setTimeout(() => setShowITwinDropdown(false), 150)}
+            disabled={iTwinsLoading}
+            className="pr-8"
+          />
+          {selectedITwinId && iTwinSearch && (
+            <button
+              type="button"
+              onClick={() => { setSelectedITwinId(''); setITwinSearch(''); setShowITwinDropdown(false); loadRealityData({ reset: true }); }}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+            >×</button>
+          )}
+          {showITwinDropdown && !iTwinsLoading && (
+            <div className="absolute z-10 w-full mt-1 bg-background border rounded-md shadow-lg max-h-60 overflow-auto text-sm">
+              {!iTwinSearch && recentITwins.length > 0 && (
+                <>
+                  <div className="px-3 py-1 text-xs font-medium text-muted-foreground bg-muted/50 border-b">Recent iTwins</div>
+                  {recentITwins.map(t => (
+                    <div
+                      key={`recent-${t.id}`}
+                      className="px-3 py-2 hover:bg-muted cursor-pointer flex justify-between"
+                      onMouseDown={e => e.preventDefault()}
+                      onClick={() => selectGlobalITwin(t)}
+                    >
+                      <span className="truncate">{t.displayName}</span>
+                      <span className="text-xs text-muted-foreground">({t.id.slice(0,8)}…)</span>
+                    </div>
+                  ))}
+                  {iTwins.length > 0 && <div className="px-3 py-1 text-xs font-medium text-muted-foreground bg-muted/50 border-b">All iTwins</div>}
+                </>
+              )}
+              {iTwins
+                .filter(t => !iTwinSearch || t.displayName.toLowerCase().includes(iTwinSearch.toLowerCase()) || t.id.toLowerCase().includes(iTwinSearch.toLowerCase()))
+                .slice(0, iTwinSearch ? 25 : 12)
+                .map(t => (
+                  <div
+                    key={t.id}
+                    className="px-3 py-2 hover:bg-muted cursor-pointer flex justify-between"
+                    onMouseDown={e => e.preventDefault()}
+                    onClick={() => selectGlobalITwin(t)}
+                  >
+                    <span className="truncate">{t.displayName}</span>
+                    <span className="text-xs text-muted-foreground">({t.id.slice(0,8)}…)</span>
+                  </div>
+                ))}
+              {iTwins.length === 0 && !iTwinSearch && (
+                <div className="px-3 py-2 text-muted-foreground">No iTwins available</div>
+              )}
+              {iTwins.filter(t => t.displayName.toLowerCase().includes(iTwinSearch.toLowerCase()) || t.id.toLowerCase().includes(iTwinSearch.toLowerCase())).length === 0 && iTwinSearch && (
+                <div className="px-3 py-2 text-muted-foreground">No iTwins match "{iTwinSearch}"</div>
+              )}
+            </div>
+          )}
+        </div>
+        {selectedITwinId && (
+          <p className="text-xs text-muted-foreground">Filtering reality data for iTwin <span className="font-mono">{selectedITwinId}</span></p>
+        )}
       </div>
 
       {error && (
@@ -342,6 +791,8 @@ const RealityModelingComponent: React.FC = () => {
         {CATEGORY_FILTERS.map(btn => (
           <Button key={btn.key} type="button" variant={categoryFilter === btn.key ? 'default':'outline'} size="sm" onClick={()=>selectCategory(btn.key)} disabled={loading && categoryFilter===btn.key}>{btn.label}</Button>
         ))}
+        <Button type="button" size="sm" variant="outline" onClick={()=>setNewICOpen(true)} className="inline-flex items-center gap-1"><ImagePlus className="h-3 w-3" /> New Image Collection</Button>
+        <Button type="button" size="sm" variant="outline" onClick={()=>setNewCOOpen(true)} className="inline-flex items-center gap-1"><FileCog className="h-3 w-3" /> New CCOrientations</Button>
       </div>
 
       <div className="space-y-3">
@@ -376,6 +827,17 @@ const RealityModelingComponent: React.FC = () => {
                     {rd.tags.length > 5 && (
                       <Badge variant="outline" className="text-[10px]">+{rd.tags.length - 5} more</Badge>
                     )}
+                  </div>
+                )}
+                {rd.type === 'CCImageCollection' && (
+                  <div className="pt-1">
+                    <Button variant="outline" size="sm" onClick={()=>openUploadDialog(rd)} disabled={!selectedITwinId}>
+                      <UploadCloud className="h-3 w-3 mr-1" /> Upload Images
+                    </Button>
+                    <Button variant="outline" size="sm" className="ml-2" onClick={()=>openGenerateCO(rd)} disabled={!selectedITwinId}>
+                      <Link2 className="h-3 w-3 mr-1" /> Gen Orientations
+                    </Button>
+                    {!selectedITwinId && <p className="text-[10px] text-muted-foreground mt-1">Select iTwin to enable upload</p>}
                   </div>
                 )}
               </CardContent>
@@ -526,6 +988,173 @@ const RealityModelingComponent: React.FC = () => {
           )}
         </div>
       </DialogContent>
+  </Dialog>
+  <Dialog open={newICOpen} onOpenChange={(o)=>{ setNewICOpen(o); if(!o) resetICForm(); }}>
+    <DialogContent className="max-w-sm">
+      <DialogHeader>
+        <DialogTitle>Create Image Collection</DialogTitle>
+        <DialogDescription>Creates a CCImageCollection reality data item in the selected iTwin.</DialogDescription>
+      </DialogHeader>
+      <div className="space-y-3">
+        <div className="space-y-1">
+          <Label htmlFor="ic-name">Display Name<span className="text-red-500 ml-0.5">*</span></Label>
+          <Input id="ic-name" value={newICName} onChange={e=>setNewICName(e.target.value)} placeholder="My Image Collection" />
+        </div>
+        {!selectedITwinId && <p className="text-xs text-amber-600">Select an iTwin first (top of page).</p>}
+        {icError && <p className="text-xs text-red-600">{icError}</p>}
+      </div>
+      <DialogFooter className="gap-2">
+        <Button variant="outline" onClick={()=>{ setNewICOpen(false); resetICForm(); }} disabled={creatingIC}>Cancel</Button>
+        <Button onClick={submitCreateImageCollection} disabled={creatingIC || !newICName.trim() || !selectedITwinId}>
+          {creatingIC && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Create
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+  <Dialog open={newCOOpen} onOpenChange={(o)=>{ setNewCOOpen(o); if(!o) resetCOForm(); }}>
+    <DialogContent className="max-w-sm">
+      <DialogHeader>
+        <DialogTitle>Create CCOrientations</DialogTitle>
+        <DialogDescription>Creates a CCOrientations reality data item then uploads the orientation file.</DialogDescription>
+      </DialogHeader>
+      <div className="space-y-3">
+        <div className="space-y-1">
+          <Label htmlFor="co-name">Display Name<span className="text-red-500 ml-0.5">*</span></Label>
+          <Input id="co-name" value={newCOName} onChange={e=>setNewCOName(e.target.value)} placeholder="My Orientations" />
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor="co-file">Orientation File<span className="text-red-500 ml-0.5">*</span></Label>
+          <Input id="co-file" type="file" accept=".json,.txt,application/json,text/plain" onChange={e=>setCOFile(e.target.files?.[0]||null)} />
+          {coFile && <p className="text-[10px] text-muted-foreground">Selected: {coFile.name} ({(coFile.size/1024).toFixed(1)} KB)</p>}
+        </div>
+        {!selectedITwinId && <p className="text-xs text-amber-600">Select an iTwin first (top of page).</p>}
+        {coError && <p className="text-xs text-red-600">{coError}</p>}
+      </div>
+      <DialogFooter className="gap-2">
+        <Button variant="outline" onClick={()=>{ setNewCOOpen(false); resetCOForm(); }} disabled={creatingCO}>Cancel</Button>
+        <Button onClick={submitCreateCCOrientations} disabled={creatingCO || !newCOName.trim() || !selectedITwinId || !coFile}>
+          {creatingCO && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Create & Upload
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+  <Dialog open={genCOOpen} onOpenChange={(o)=>{ setGenCOOpen(o); if(!o){ setGenTargetIC(null); setGenImages([]); setGenError(null); setGenCOId(''); } }}>
+    <DialogContent className="max-w-md">
+      <DialogHeader>
+        <DialogTitle>Generate CCOrientations</DialogTitle>
+        <DialogDescription>Create & upload Orientations.xmlz referencing all images in this image collection.</DialogDescription>
+      </DialogHeader>
+      <div className="space-y-4">
+        {genTargetIC && <p className="text-xs">Image Collection: <span className="font-mono">{genTargetIC.id}</span></p>}
+        <div className="space-y-1">
+          <Label htmlFor="gen-block">Block Name</Label>
+          <Input id="gen-block" value={genBlockName} onChange={e=>setGenBlockName(e.target.value)} />
+        </div>
+        {genError && <p className="text-xs text-red-600">{genError}</p>}
+        {genLoadingImages && <div className="text-xs flex items-center gap-2"><Loader2 className="h-3 w-3 animate-spin" /> Listing images…</div>}
+        {!genLoadingImages && genImages.length > 0 && (
+          <div className="border rounded p-2 max-h-40 overflow-auto text-[11px] space-y-1">
+            {genImages.slice(0,120).map((n,i)=>(<div key={i} className="flex justify-between"><span className="truncate max-w-[70%]" title={n}>{n}</span><span>{i}</span></div>))}
+            {genImages.length>120 && <div className="text-muted-foreground">… {genImages.length-120} more</div>}
+          </div>
+        )}
+        {genCOId && <p className="text-xs text-green-600">Created CCOrientations ID: <span className="font-mono">{genCOId}</span></p>}
+      </div>
+      <DialogFooter className="gap-2">
+        <Button variant="outline" onClick={()=>setGenCOOpen(false)} disabled={genCreating}>Close</Button>
+        <Button onClick={generateOrientations} disabled={genCreating || genImages.length===0 || !genBlockName.trim()}>
+          {genCreating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Generate & Upload
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+  <Dialog open={uploadOpen} onOpenChange={(o)=>{ setUploadOpen(o); if(!o){ setUploadTarget(null); setSelectedFiles([]); setUploadProgress({}); setUploadError(null);} }}>
+    <DialogContent className="max-w-lg">
+      <DialogHeader>
+        <DialogTitle>Upload Images</DialogTitle>
+        <DialogDescription>
+          {uploadTarget ? `Add image files to ${uploadTarget.displayName || uploadTarget.id}` : 'Select images to upload.'}
+        </DialogDescription>
+      </DialogHeader>
+      <div className="space-y-4">
+  {!containerUrl && !uploadError && <p className="text-xs text-muted-foreground">Requesting write access… (ensure the reality data is of type CCImageCollection and you have modify scope)</p>}
+        {uploadError && <p className="text-xs text-red-600">{uploadError}</p>}
+        <div>
+          {/* Hidden native input; triggered by button for better UX */}
+          <input
+            ref={fileInputRef}
+            className="hidden"
+            type="file"
+            multiple
+            accept="image/*"
+            onChange={e=>onSelectFiles(e.target.files)}
+            disabled={!containerUrl || uploading}
+          />
+          {(!containerUrl && !uploadError) ? (
+            // Skeleton / disabled state while awaiting write access
+            <Button variant="outline" size="sm" disabled className="w-[160px] justify-center">
+              <Loader2 className="h-3 w-3 mr-2 animate-spin" /> Preparing access…
+            </Button>
+          ) : (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!containerUrl || uploading}
+              className="w-[160px] justify-center"
+            >
+              <UploadCloud className="h-3 w-3 mr-2" /> Select Images
+            </Button>
+          )}
+          <p className="text-[11px] text-muted-foreground mt-1">
+            Choose image files to associate with this collection. Upload starts only when you press Upload.
+            {!containerUrl && !uploadError && ' Waiting for write access URL…'}
+          </p>
+        </div>
+        {selectedFiles.length > 0 && (
+          <div className="border rounded-md p-2 max-h-48 overflow-auto space-y-2">
+            {selectedFiles.map(f => (
+              <div key={f.name} className="flex items-center justify-between gap-2 text-xs">
+                <span className="truncate" title={f.name}>{f.name}</span>
+                <span className="text-muted-foreground">{(f.size/1024/1024).toFixed(2)} MB</span>
+                <div className="w-32 h-2 bg-muted rounded overflow-hidden">
+                  <div className="h-full bg-primary transition-all" style={{ width: `${uploadProgress[f.name]||0}%`}} />
+                </div>
+                <span>{uploadProgress[f.name] ? `${uploadProgress[f.name]}%` : '0%'}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <Separator />
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <h4 className="text-xs font-semibold">Existing Files</h4>
+            <Button variant="ghost" size="sm" onClick={loadContainerListing} disabled={!containerUrl || listingLoading} className="h-6 px-2 text-[10px]">
+              {listingLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Refresh'}
+            </Button>
+          </div>
+          {!containerUrl && <p className="text-[10px] text-muted-foreground">Waiting for access…</p>}
+          {listingError && <p className="text-[10px] text-red-600">{listingError}</p>}
+          {containerUrl && !listingLoading && containerListing.length === 0 && !listingError && (
+            <p className="text-[10px] text-muted-foreground">No files found in container.</p>
+          )}
+          {containerListing.length > 0 && (
+            <div className="border rounded-md p-2 max-h-40 overflow-auto divide-y">
+              {containerListing.map(item => (
+                <div key={item.name} className="flex items-center justify-between gap-2 py-1 text-[11px]">
+                  <span className="truncate max-w-[60%]" title={item.name}>{item.name}</span>
+                  <span className="text-muted-foreground">{(item.size/1024).toFixed(1)} KB</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+      <DialogFooter className="gap-2">
+        <Button variant="outline" onClick={()=>setUploadOpen(false)} disabled={uploading}>Close</Button>
+        <Button onClick={uploadAll} disabled={uploading || !containerUrl || selectedFiles.length===0}>{uploading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}Upload</Button>
+      </DialogFooter>
+    </DialogContent>
   </Dialog>
   </>
   );
