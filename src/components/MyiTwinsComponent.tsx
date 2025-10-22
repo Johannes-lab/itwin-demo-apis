@@ -6,7 +6,7 @@ import type { iTwin } from '../services/iTwinAPIService';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
-import { Globe, Hash, Tag, Database, Shield, Clock } from 'lucide-react';
+import { Globe, Hash, Tag, Database, Shield, Clock, HardDrive } from 'lucide-react';
 import AccessControlModal from './AccessControlModal';
 
 // Utility functions for managing recently viewed iTwins
@@ -56,6 +56,14 @@ function MyiTwinsComponent() {
     setRecentViewedITwins(getRecentViewedITwins());
     
     navigate(`/itwins/${iTwin.id}/imodels`);
+  };
+
+  const handleViewStorage = (iTwin: iTwin) => {
+    // Save to recent viewed iTwins
+    saveRecentViewedITwin(iTwin);
+    setRecentViewedITwins(getRecentViewedITwins());
+    
+    navigate(`/storage?iTwinId=${iTwin.id}`);
   };
 
   const handleManageAccess = (iTwin: iTwin) => {
@@ -258,6 +266,18 @@ function MyiTwinsComponent() {
                         size="sm"
                         onClick={(e) => {
                           e.stopPropagation();
+                          handleViewStorage(iTwin);
+                        }}
+                        className="flex-1"
+                      >
+                        <HardDrive className="w-4 h-4 mr-2" />
+                        Storage
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={(e) => {
+                          e.stopPropagation();
                           handleManageAccess(iTwin);
                         }}
                         className="flex-1"
@@ -417,6 +437,18 @@ function MyiTwinsComponent() {
                     size="sm"
                     onClick={(e) => {
                       e.stopPropagation();
+                      handleViewStorage(iTwin);
+                    }}
+                    className="flex-1"
+                  >
+                    <HardDrive className="w-4 h-4 mr-2" />
+                    Storage
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={(e) => {
+                      e.stopPropagation();
                       handleManageAccess(iTwin);
                     }}
                     className="flex-1"
@@ -474,6 +506,17 @@ function MyiTwinsComponent() {
                           >
                             <Database className="w-4 h-4 mr-1" />
                             View iModels
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleViewStorage(iTwin);
+                            }}
+                          >
+                            <HardDrive className="w-4 h-4 mr-1" />
+                            Storage
                           </Button>
                           <Button
                             variant="outline"

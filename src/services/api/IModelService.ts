@@ -189,10 +189,10 @@ class IModelService extends BaseAPIClient {
   /**
    * Update an existing iModel
    * @param iModelId - The iModel ID
-   * @param updateRequest - The iModel update request
+   * @param updateRequest - The iModel update request (can be UpdateIModelRequest or simple object with displayName/description)
    */
-  async updateIModel(iModelId: string, updateRequest: UpdateIModelRequest): Promise<SingleIModelResponse> {
-    return this.fetch<SingleIModelResponse>(
+  async updateIModel(iModelId: string, updateRequest: UpdateIModelRequest | { displayName?: string; description?: string }): Promise<SingleIModelResponse | IModel> {
+    const response = await this.fetch<SingleIModelResponse>(
       API_CONFIG.ENDPOINTS.IMODELS.UPDATE_IMODEL(iModelId),
       {
         method: 'PATCH',
@@ -203,6 +203,7 @@ class IModelService extends BaseAPIClient {
         body: JSON.stringify(updateRequest),
       }
     );
+    return response.iModel || response;
   }
 
   /**

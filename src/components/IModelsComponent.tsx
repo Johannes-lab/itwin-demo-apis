@@ -11,6 +11,8 @@ import { Loader2, Database, Calendar, MapPin, CheckCircle, Clock, Grid3X3, List,
 import { CreateIModelModal } from './CreateIModelModal';
 import { CloneIModelModal } from './CloneIModelModal';
 import { DeleteIModelModal } from './DeleteIModelModal';
+import { Pencil } from "lucide-react";
+import { EditIModelModal } from './ui/EditIModelModal';
 
 interface IModelsComponentProps {
   iTwinId?: string;
@@ -334,6 +336,21 @@ export default function IModelsComponent({ iTwinId, iTwinName }: IModelsComponen
                         <GitBranch className="w-4 h-4 mr-2" />
                         Versions
                       </Button>
+
+                      <EditIModelModal
+                        iModel={iModel}
+                        onUpdated={handleRefreshIModels}
+                        trigger={
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            title="Edit iModel"
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </Button>
+                        }
+                      />
+
                       <CloneIModelModal 
                         iModel={iModel}
                         onCloned={handleRefreshIModels}
@@ -411,6 +428,21 @@ export default function IModelsComponent({ iTwinId, iTwinName }: IModelsComponen
                             <GitBranch className="w-3 h-3 mr-1" />
                             Versions
                           </Button>
+                          
+                          <EditIModelModal
+                            iModel={iModel}
+                            onUpdated={handleRefreshIModels}
+                            trigger={
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                title="Edit iModel"
+                              >
+                                <Pencil className="w-3 h-3" />
+                              </Button>
+                            }
+                          />
+
                           <CloneIModelModal 
                             iModel={iModel}
                             onCloned={handleRefreshIModels}
