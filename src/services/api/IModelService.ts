@@ -28,7 +28,7 @@ class IModelService extends BaseAPIClient {
   private extractUserIdFromCreatorHref(creatorHref: string): string | undefined {
     try {
       // Extract user ID from URL like: https://api.bentley.com/imodels/{iModelId}/users/{userId}
-      const match = creatorHref.match(/\/users\/([^\/]+)$/);
+  const match = creatorHref.match(/\/users\/([^/]+)$/); // simplified (removed unnecessary escapes)
       return match ? match[1] : undefined;
     } catch (error) {
       console.warn('Failed to extract user ID from creator href:', creatorHref, error);

@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 import { iTwinApiService, synchronizationService, storageService } from '../services';
 import { iModelApiService } from '../services/api';
 import type { iTwin } from '../services/iTwinAPIService';
-import type { ManifestConnection } from '../services/types';
+import type { ManifestConnection, StorageListItem, StorageFile } from '../services/types';
 import type { CreateIModelRequest } from '../services/types/imodel.types';
 
 export default function SynchronizationComponent() {
@@ -34,7 +34,7 @@ export default function SynchronizationComponent() {
   const [storageDisplayName, setStorageDisplayName] = useState('');
   const [connectorType, setConnectorType] = useState('DGN');
   const [creatingStorageConnection, setCreatingStorageConnection] = useState(false);
-  const [createdStorageConnection, setCreatedStorageConnection] = useState<any>(null);
+  const [createdStorageConnection, setCreatedStorageConnection] = useState<null | { id: string; displayName?: string; iModelId: string }>(null);
   const [storageRunSubmitting, setStorageRunSubmitting] = useState(false);
   const [storageRunLocation, setStorageRunLocation] = useState<string | null>(null);
   const [storageError, setStorageError] = useState<string | null>(null);
@@ -42,8 +42,8 @@ export default function SynchronizationComponent() {
   // Enhanced storage file browser state
   const [storageBrowserOpen, setStorageBrowserOpen] = useState(false);
   const [storageBrowserPath, setStorageBrowserPath] = useState<Array<{id: string, name: string}>>([]);
-  const [storageBrowserItems, setStorageBrowserItems] = useState<Array<any>>([]);
-  const [selectedStorageFiles, setSelectedStorageFiles] = useState<any[]>([]);
+  const [storageBrowserItems, setStorageBrowserItems] = useState<StorageListItem[]>([]);
+  const [selectedStorageFiles, setSelectedStorageFiles] = useState<StorageFile[]>([]);
   const [multiSelectMode, setMultiSelectMode] = useState(false);
   const [storageITwinSearch, setStorageITwinSearch] = useState('');
   const [storageShowITwinDropdown, setStorageShowITwinDropdown] = useState(false);
@@ -202,7 +202,7 @@ export default function SynchronizationComponent() {
     }
   };
 
-  const toggleFileSelection = (file: any) => {
+  const toggleFileSelection = (file: StorageListItem) => {
     // Only allow file selection, not folders
     if (file.type === 'folder') return;
     
@@ -211,7 +211,7 @@ export default function SynchronizationComponent() {
       if (isSelected) {
         return prev.filter(f => f.id !== file.id);
       } else {
-        return multiSelectMode ? [...prev, file] : [file];
+        return multiSelectMode ? [...prev, file as StorageFile] : [file as StorageFile];
       }
     });
   };

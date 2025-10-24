@@ -8,7 +8,7 @@ import { Badge } from './ui/badge';
 import { AlertTriangle, RefreshCw, Layers, Plus, Loader2, ImagePlus, UploadCloud, FileCog, Link2, LayoutGrid, List as ListIcon, Trash2 } from 'lucide-react';
 import { buildOrientationsXml, buildOrientationsZip } from '../lib/orientations';
 import { realityManagementService, realityModelingService, iTwinApiService } from '../services';
-import type { RealityDataSummary, RealityDataListResponse, RealityDataListParams, Workspace, Job, iTwin } from '../services/types';
+import type { RealityDataSummary, RealityDataListResponse, RealityDataListParams, Workspace, Job, iTwin, JobUserMessage } from '../services/types';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from './ui/dialog';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
@@ -88,6 +88,7 @@ const OrientationSelect: React.FC<OrientationSelectProps> = ({ items, loading, v
 );
 
 type CategoryFilter = 'ALL' | BaseCategory | 'RECONSTRUCTIONS';
+
 
 const RealityModelingComponent: React.FC = () => {
   // Global iTwin selection (for filtering Reality Data list & preselecting reconstruction workflow)
@@ -235,7 +236,7 @@ const RealityModelingComponent: React.FC = () => {
   const [progressStep, setProgressStep] = useState<string>('');
   const [progressError, setProgressError] = useState<string | null>(null);
   const [jobFailed, setJobFailed] = useState(false);
-  const [jobFailureMessages, setJobFailureMessages] = useState<any[]>([]);
+  const [jobFailureMessages, setJobFailureMessages] = useState<JobUserMessage[]>([]);
   const [showJobErrorDialog, setShowJobErrorDialog] = useState(false);
   // Cost estimation
   const [gigaPixels, setGigaPixels] = useState<number | ''>('');
@@ -247,17 +248,17 @@ const RealityModelingComponent: React.FC = () => {
   const [workspaceList, setWorkspaceList] = useState<Workspace[]>([]);
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [selectedExistingWorkspaceId, setSelectedExistingWorkspaceId] = useState<string>('');
-  const refreshWorkspaces = async () => {
+  const refreshWorkspaces = useCallback(async () => {
     setWorkspaceLoading(true);
     try {
       const ws = await realityModelingService.getWorkspaces();
       if (ws) {
-        // Filter by selected iTwin if chosen
         setWorkspaceList(selectedITwinId ? ws.filter(w => w.iTwinId === selectedITwinId) : ws);
       }
     } catch (e) { console.error('Failed to load workspaces', e); } finally { setWorkspaceLoading(false); }
-  };
-  useEffect(()=>{ if (newReconOpen && step===1) { refreshWorkspaces(); } }, [newReconOpen, step, selectedITwinId]);
+  }, [selectedITwinId]);
+  // Refresh workspaces when dialog opens at step 1. refreshWorkspaces is stable via useCallback wrapper.
+  useEffect(()=>{ if (newReconOpen && step===1) { refreshWorkspaces(); } }, [newReconOpen, step, selectedITwinId, refreshWorkspaces]);
 
   // New Image Collection creation state
   const [newICOpen, setNewICOpen] = useState(false);
@@ -301,8 +302,8 @@ const RealityModelingComponent: React.FC = () => {
       } else {
         setICError('Creation failed');
       }
-    } catch (e:any) {
-      setICError(e.message || 'Unexpected error');
+    } catch (e: unknown) {
+      setICError(e instanceof Error ? e.message : 'Unexpected error');
     } finally { setCreatingIC(false); }
   };
 
@@ -333,6 +334,7 @@ const RealityModelingComponent: React.FC = () => {
         u.pathname = path + encodeURIComponent(desiredName);
         targetUrl = u.toString();
       } catch {
+        // Fallback if URL parsing fails; construct manually using string operations.
         const [b, q] = access.containerUrl.split('?');
         targetUrl = `${b.replace(/\/$/, '')}/${encodeURIComponent(coFile.name)}${q ? `?${q}` : ''}`;
       }
@@ -340,7 +342,7 @@ const RealityModelingComponent: React.FC = () => {
         const xhr = new XMLHttpRequest();
         xhr.open('PUT', targetUrl, true);
         xhr.setRequestHeader('x-ms-blob-type','BlockBlob');
-        if (coFile.type) try { xhr.setRequestHeader('Content-Type', coFile.type); } catch {}
+  if (coFile.type) try { xhr.setRequestHeader('Content-Type', coFile.type); } catch { /* Header may be blocked by browser/CORS; safe to ignore */ }
         xhr.onerror = () => reject(new Error('Network error uploading orientations'));
         xhr.onload = () => {
           if (xhr.status >= 200 && xhr.status < 300) resolve(); else reject(new Error('Upload failed ' + xhr.status));
@@ -351,8 +353,8 @@ const RealityModelingComponent: React.FC = () => {
       // Refresh list and close
       loadRealityData({ reset: true });
       setNewCOOpen(false); resetCOForm();
-    } catch (e:any) {
-      const msg = e.message || 'Unexpected error';
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Unexpected error';
       setCOError(msg);
       toast.error('CCOrientations error', { description: msg });
     } finally {
@@ -388,8 +390,8 @@ const RealityModelingComponent: React.FC = () => {
       }
       if (names.length === 0) setGenError('No image files found in collection container.');
       setGenImages(names);
-    } catch (e:any) {
-      setGenError(e.message || 'Failed to list images');
+    } catch (e: unknown) {
+      setGenError(e instanceof Error ? e.message : 'Failed to list images');
     } finally {
       setGenLoadingImages(false);
     }
@@ -422,6 +424,7 @@ const RealityModelingComponent: React.FC = () => {
         u.pathname = p + 'Orientations.xmlz';
         targetUrl = u.toString();
       } catch {
+        // Fallback manual URL construction for Orientations.xmlz
         const [b,q] = access.containerUrl.split('?');
         targetUrl = `${b.replace(/\/$/,'')}/Orientations.xmlz${q?`?${q}`:''}`;
       }
@@ -435,8 +438,8 @@ const RealityModelingComponent: React.FC = () => {
       });
       toast.success('Generated CCOrientations', { description: created.id });
       loadRealityData({ reset: true });
-    } catch (e:any) {
-      const msg = e.message || 'Generation failed';
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Generation failed';
       setGenError(msg);
       toast.error('Generation error', { description: msg });
     } finally {
@@ -501,7 +504,7 @@ const RealityModelingComponent: React.FC = () => {
       const paths = Array.from(xml.matchAll(/<ImagePath>(.*?)<\/ImagePath>/g)).map(m => m[1].trim()).filter(Boolean);
       const collections = Array.from(new Set(paths.map(p => p.split('/')[0])));
       return { collections, imagePaths: paths };
-    } catch { return { collections: [], imagePaths: [] }; }
+  } catch { /* XML parsing failed; return empty collections to trigger graceful UI messaging */ return { collections: [], imagePaths: [] }; }
   };
 
   const verifyImagesExist = async (collectionId: string, imageNames: string[]): Promise<{ missing: string[] }> => {
@@ -526,7 +529,7 @@ const RealityModelingComponent: React.FC = () => {
       const set = new Set(all.map(a => a.toLowerCase()));
       const missing = imageNames.filter(n => !set.has(n.toLowerCase()));
       return { missing };
-    } catch { return { missing: imageNames }; }
+  } catch { /* Listing failed (network or parse); assume all provided names missing */ return { missing: imageNames }; }
   };
 
   const preflightValidateJob = async (): Promise<boolean> => {
@@ -589,8 +592,8 @@ const RealityModelingComponent: React.FC = () => {
       const list = Object.values(unique);
       setContainerListing(list);
       if (uploadTarget) setCollectionCounts(prev => ({ ...prev, [uploadTarget.id]: list.length }));
-    } catch (e:any) {
-      setListingError(e.message || 'Failed to list');
+    } catch (e: unknown) {
+      setListingError(e instanceof Error ? e.message : 'Failed to list');
     } finally {
       setListingLoading(false);
     }
@@ -633,8 +636,8 @@ const RealityModelingComponent: React.FC = () => {
       const xmlContent = await xmlFile.async('string');
       setOrientXml(xmlContent);
       toast.success('Orientations loaded', { description: 'XML displayed.' });
-    } catch (e:any) {
-      const msg = e.message || 'Failed to open orientations';
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Failed to open orientations';
       setOrientError(msg);
       toast.error('Viewer error', { description: msg });
     } finally { setOrientLoading(false); }
@@ -693,7 +696,7 @@ const RealityModelingComponent: React.FC = () => {
             xhr.open('PUT', fileUrl, true);
             xhr.setRequestHeader('x-ms-blob-type','BlockBlob'); // Azure style; harmless if not Azure
             // Content-Type helps some viewers and may be required for certain processing
-            if (file.type) try { xhr.setRequestHeader('Content-Type', file.type); } catch {}
+            if (file.type) try { xhr.setRequestHeader('Content-Type', file.type); } catch { /* Non-critical: proceed without explicit Content-Type */ }
             xhr.upload.onprogress = (e) => {
               if (e.lengthComputable) {
                 setUploadProgress(prev => ({ ...prev, [file.name]: Math.round((e.loaded / e.total) * 100) }));
@@ -719,9 +722,10 @@ const RealityModelingComponent: React.FC = () => {
       loadRealityData({ reset: true });
       await loadContainerListing();
       toast.success('Upload complete', { description: `${successCount} file(s) uploaded.` });
-    } catch (e:any) {
-      setUploadError(e.message || 'Upload failed');
-      toast.error('Upload error', { description: e.message });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Upload failed';
+      setUploadError(msg);
+      toast.error('Upload error', { description: msg });
     } finally {
       setUploading(false);
     }
@@ -853,8 +857,8 @@ const RealityModelingComponent: React.FC = () => {
       } else {
         toast.error('Failed to estimate cost');
       }
-    } catch (e:any) {
-      toast.error('Cost estimation error', { description: e.message });
+    } catch (e: unknown) {
+      toast.error('Cost estimation error', { description: e instanceof Error ? e.message : 'Unknown error' });
     } finally { setCostEstimating(false); }
   };
 
@@ -885,7 +889,7 @@ const RealityModelingComponent: React.FC = () => {
       if (done) {
         if (stateLower === 'failed') {
           setJobFailed(true);
-          const msgs = (prog as any).userMessages || [];
+          const msgs: JobUserMessage[] = prog.userMessages || [];
             setJobFailureMessages(msgs);
             setShowJobErrorDialog(true);
         }
