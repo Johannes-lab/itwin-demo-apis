@@ -12,14 +12,39 @@ import type {
 } from "../types";
 
 export class RealityModelingService extends BaseAPIClient {
+  private resolvedWorkspacesEndpoint: string | null = null;
+  private workspaceEndpointTried = false;
+  public lastWorkspacesError: any = null;
+
+  private async resolveWorkspacesEndpoint(): Promise<string> {
+    if (this.resolvedWorkspacesEndpoint) return this.resolvedWorkspacesEndpoint;
+    if (this.workspaceEndpointTried) return API_CONFIG.ENDPOINTS.CONTEXT_CAPTURE.WORKSPACES; // fallback original
+    this.workspaceEndpointTried = true;
+    const candidates = [
+      API_CONFIG.ENDPOINTS.CONTEXT_CAPTURE.WORKSPACES,
+      '/itwincapture/workspaces',
+      '/contextcapture/v1/workspaces',
+      '/itwincapture/v1/workspaces'
+    ];
+    for (const ep of candidates) {
+      try {
+        // HEAD would be ideal; use GET with $top=1 style param if supported later; for now just GET
+        const res = await fetch(`${API_CONFIG.BASE_URL}${ep}`, { headers: { Accept: API_CONFIG.DEFAULT_HEADERS.Accept } });
+        if (res.ok) { this.resolvedWorkspacesEndpoint = ep; return ep; }
+      } catch { /* ignore */ }
+    }
+    // If none succeed, keep default (will yield 404 but logged)
+    this.resolvedWorkspacesEndpoint = API_CONFIG.ENDPOINTS.CONTEXT_CAPTURE.WORKSPACES;
+    return this.resolvedWorkspacesEndpoint;
+  }
   public async createWorkspace(name: string, iTwinId?: string): Promise<Workspace | null> {
     try {
       const body: { name: string; iTwinId?: string } = { name };
       if (iTwinId) {
         body.iTwinId = iTwinId;
       }
-
-      const data = await this.fetch<WorkspaceResponse>(API_CONFIG.ENDPOINTS.CONTEXT_CAPTURE.WORKSPACES, {
+      const ep = await this.resolveWorkspacesEndpoint();
+      const data = await this.fetch<WorkspaceResponse>(ep, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -35,11 +60,24 @@ export class RealityModelingService extends BaseAPIClient {
 
   public async getWorkspaces(): Promise<Workspace[] | null> {
     try {
-      const data = await this.fetch<WorkspacesResponse>(API_CONFIG.ENDPOINTS.CONTEXT_CAPTURE.WORKSPACES);
+      const ep = await this.resolveWorkspacesEndpoint();
+      const data = await this.fetch<WorkspacesResponse>(ep);
       return data.workspaces;
     } catch (error) {
       console.error("Error fetching workspaces:", error);
+      this.lastWorkspacesError = error;
       return null;
+    }
+  }
+
+  public async deleteWorkspace(workspaceId: string): Promise<boolean> {
+    try {
+      const ep = await this.resolveWorkspacesEndpoint();
+      await this.fetch<null>(`${ep}/${workspaceId}`, { method: 'DELETE' });
+      return true;
+    } catch (error) {
+      console.error('Error deleting workspace:', error);
+      return false;
     }
   }
 

@@ -82,4 +82,15 @@ export class RealityManagementService extends BaseAPIClient {
       return null;
     }
   }
+
+  public async deleteRealityData(realityDataId: string): Promise<boolean> {
+    try {
+      const endpoint = `/reality-management/reality-data/${encodeURIComponent(realityDataId)}`;
+      await this.fetch<null>(endpoint, { method: 'DELETE' });
+      return true;
+    } catch (e) {
+      console.error('Failed to delete reality data', e);
+      return false;
+    }
+  }
 }
