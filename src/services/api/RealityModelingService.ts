@@ -11,29 +11,74 @@ import type {
   JobProgressResponse,
 } from "../types";
 
+interface WorkspaceEndpointAttempt {
+  endpoint: string;
+  accept: string;
+  method: 'HEAD' | 'GET';
+  status?: number;
+  ok?: boolean;
+  error?: string;
+}
+
 export class RealityModelingService extends BaseAPIClient {
   private resolvedWorkspacesEndpoint: string | null = null;
   private workspaceEndpointTried = false;
-  public lastWorkspacesError: any = null;
+  // Store last workspace error (unknown to avoid any); can be inspected by UI with type narrowing
+  public lastWorkspacesError: unknown = null;
+  public workspaceAttempts: WorkspaceEndpointAttempt[] = [];
 
-  private async resolveWorkspacesEndpoint(): Promise<string> {
-    if (this.resolvedWorkspacesEndpoint) return this.resolvedWorkspacesEndpoint;
-    if (this.workspaceEndpointTried) return API_CONFIG.ENDPOINTS.CONTEXT_CAPTURE.WORKSPACES; // fallback original
+  /**
+   * Attempt to discover the correct workspaces endpoint. We consider an endpoint "valid" if:
+   * - HTTP status is 200-299 (definitely OK)
+   * - OR status is 401/403 (endpoint exists but auth/permissions differ)
+   * - OR status is 400 (endpoint exists but request missing parameters)
+   * We ignore 404/405/500 series as invalid for selection.
+   * We probe multiple Accept headers because some services version their Accept instead of path.
+   */
+  private async resolveWorkspacesEndpoint(forceRefresh = false): Promise<string> {
+    if (!forceRefresh && this.resolvedWorkspacesEndpoint) return this.resolvedWorkspacesEndpoint;
+    if (!forceRefresh && this.workspaceEndpointTried && !this.resolvedWorkspacesEndpoint) {
+      return API_CONFIG.ENDPOINTS.CONTEXT_CAPTURE.WORKSPACES; // fallback original
+    }
     this.workspaceEndpointTried = true;
-    const candidates = [
-      API_CONFIG.ENDPOINTS.CONTEXT_CAPTURE.WORKSPACES,
-      '/itwincapture/workspaces',
+
+    const endpointCandidates = [
+      API_CONFIG.ENDPOINTS.CONTEXT_CAPTURE.WORKSPACES, // documented base
       '/contextcapture/v1/workspaces',
+      '/itwincapture/workspaces', // alt naming (unversioned)
       '/itwincapture/v1/workspaces'
     ];
-    for (const ep of candidates) {
-      try {
-        // HEAD would be ideal; use GET with $top=1 style param if supported later; for now just GET
-        const res = await fetch(`${API_CONFIG.BASE_URL}${ep}`, { headers: { Accept: API_CONFIG.DEFAULT_HEADERS.Accept } });
-        if (res.ok) { this.resolvedWorkspacesEndpoint = ep; return ep; }
-      } catch { /* ignore */ }
+    const acceptVariants = [
+      API_CONFIG.DEFAULT_HEADERS.Accept,
+      'application/vnd.bentley.contextcapture.v1+json',
+      'application/vnd.bentley.itwin-platform.v2+json',
+      'application/json'
+    ];
+
+    const isValidStatus = (s: number) => (s >= 200 && s < 300) || s === 400 || s === 401 || s === 403;
+
+    for (const ep of endpointCandidates) {
+      for (const accept of acceptVariants) {
+        for (const method of ['HEAD','GET'] as const) {
+          const attempt: WorkspaceEndpointAttempt = { endpoint: ep, accept, method };
+          try {
+            const res = await fetch(`${API_CONFIG.BASE_URL}${ep}`, { method, headers: { Accept: accept } });
+            attempt.status = res.status; attempt.ok = res.ok;
+            this.workspaceAttempts.push(attempt);
+            if (isValidStatus(res.status)) {
+              this.resolvedWorkspacesEndpoint = ep;
+              return ep;
+            }
+          } catch (err: unknown) {
+            attempt.error = (err instanceof Error ? err.message : 'network error');
+            this.workspaceAttempts.push(attempt);
+          }
+          // If HEAD failed with 404, try GET before moving to next accept variant
+        }
+      }
     }
-    // If none succeed, keep default (will yield 404 but logged)
+
+    // If none validated, retain original (even if 404) so callers have deterministic value.
     this.resolvedWorkspacesEndpoint = API_CONFIG.ENDPOINTS.CONTEXT_CAPTURE.WORKSPACES;
     return this.resolvedWorkspacesEndpoint;
   }

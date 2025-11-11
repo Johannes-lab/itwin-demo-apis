@@ -10,7 +10,8 @@ export class BaseAPIClient {
 
     const headers = {
       ...API_CONFIG.DEFAULT_HEADERS,
-      Authorization: `${token}`,
+      // Ensure Bearer prefix; Bentley APIs expect 'Bearer <token>'
+      Authorization: token.startsWith('Bearer ') ? token : `Bearer ${token}`,
       ...options.headers,
     };
 

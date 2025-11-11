@@ -3,9 +3,13 @@ import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
-import { ArrowLeft, GitBranch, Clock, User, Download, Eye } from 'lucide-react';
+import { ArrowLeft, GitBranch, Clock, User, Download, Eye, FileOutput, Loader2, Folder as FolderIcon } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import type { IModel, Changeset, NamedVersion } from '../services/types';
+// import { exportService } from '../services/api/ExportService'; // deprecated direct export usage
+import { exportConnectionService, type ExportRun, type ExportConnection, type CreateRunRequest } from '../services/api/ExportConnectionService';
+import { exportAuthorizationService } from '../services/api/ExportAuthorizationService';
+import { storageService } from '../services/api/StorageService';
 import { iModelService } from '../services/api/IModelService';
 import { CreateNamedVersionModal } from './CreateNamedVersionModal';
 
@@ -20,6 +24,20 @@ export default function IModelVersionsComponent({ iModel, iTwinId }: IModelVersi
   const [namedVersions, setNamedVersions] = useState<NamedVersion[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [exportingId, setExportingId] = useState<string | null>(null);
+  // const [exportDownloadUrls, setExportDownloadUrls] = useState<Record<string,string>>({}); // disabled in root test
+  const [connectionId, setConnectionId] = useState<string | null>(null);
+  const [ifcVersion, setIfcVersion] = useState<'IFC2X3' | 'IFC4' | 'IFC4X3'>('IFC4');
+  // AuthorizationInformation state
+  const [isAuthChecked, setIsAuthChecked] = useState(false);
+  const [isUserAuthorized, setIsUserAuthorized] = useState<boolean | null>(null);
+  const [authorizationUrl, setAuthorizationUrl] = useState<string | null>(null);
+  const [authChecking, setAuthChecking] = useState(false);
+  // Folder selection re-enabled
+  const [storageFolders, setStorageFolders] = useState<{ id: string; displayName: string }[]>([]);
+  const [selectedFolderId, setSelectedFolderId] = useState<string>('');
+  const [loadingFolders, setLoadingFolders] = useState(false);
+  // const [uploadingToStorage, setUploadingToStorage] = useState<string | null>(null); // disabled
 
   useEffect(() => {
     const loadChangesetsAndVersions = async () => {
@@ -127,10 +145,189 @@ export default function IModelVersionsComponent({ iModel, iTwinId }: IModelVersi
         hour: '2-digit',
         minute: '2-digit'
       });
-    } catch (error) {
+    } catch {
       return 'Invalid Date';
     }
   };
+
+  const exportNamedVersions = () => {
+    if (!namedVersions || namedVersions.length === 0) {
+      alert('No named versions to export');
+      return;
+    }
+    const minimal = namedVersions.map(v => ({
+      id: v.id,
+      displayName: v.displayName,
+      description: v.description,
+      changesetId: v.changesetId,
+      changesetIndex: v.changesetIndex,
+      createdDateTime: v.createdDateTime,
+      creatorName: (v as unknown as { creatorName?: string }).creatorName || v.creatorId,
+    }));
+    const blob = new Blob([JSON.stringify({ iModelId: iModel.id, count: minimal.length, namedVersions: minimal }, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const stamp = new Date().toISOString().replace(/[:]/g,'-');
+    a.download = `${iModel.displayName || iModel.id}-named-versions-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // Folder loading disabled during root test
+
+  const ensureConnection = async (): Promise<ExportConnection | null> => {
+    if (connectionId) {
+      const existing = await exportConnectionService.getConnection(connectionId);
+      if (existing) return existing;
+    }
+    // Create a new connection for this iModel/iTwin context
+    const created = await exportConnectionService.createConnection({
+      iModelId: iModel.id,
+      displayName: `conn-${iModel.displayName?.slice(0,12) || iModel.id.slice(0,8)}`,
+      authenticationType: 'User',
+      projectId: iTwinId,
+      description: 'UI generated export connection'
+    });
+    if (created) setConnectionId(created.id);
+    return created;
+  };
+
+  const startIFCExport = async (version: NamedVersion) => {
+    if (exportingId) return;
+    setExportingId(version.id);
+    try {
+      // Block if authorization not yet granted
+      if (isAuthChecked && isUserAuthorized === false) {
+        alert('Long-running export authorization required. Please authorize and then click Retry Authorization.');
+        setExportingId(null);
+        return;
+      }
+      if (!isAuthChecked) {
+        // Perform on-demand check if user skipped initial automatic check
+        await checkAuthorization();
+        if (isUserAuthorized === false) {
+          alert('Authorization required. Please use the Authorize button, then Retry Authorization.');
+          setExportingId(null);
+          return;
+        }
+      }
+      const conn = await ensureConnection();
+      if (!conn) throw new Error('No export connection');
+      const outputOptions: CreateRunRequest['outputOptions'] = selectedFolderId
+        ? { location: 'STORAGE', folderId: selectedFolderId, saveLogs: true, replaceOlderFile: false }
+        : { location: 'STORAGE', saveLogs: true, replaceOlderFile: false };
+      const started = await exportConnectionService.createRun(conn.id, {
+        exportType: 'IFC',
+        ifcVersion: mapIfcVersion(ifcVersion),
+        projectId: iTwinId,
+        inputOptions: { changesetId: version.changesetId },
+        outputOptions
+      });
+      if (!started) throw new Error('Run start failed');
+      pollRunsList(conn.id, version.id, 0);
+    } catch (e) {
+      console.error(e);
+      alert('Failed to start IFC export run');
+      setExportingId(null);
+    }
+  };
+
+  const pollRunsList = async (connId: string, versionId: string, attempt: number) => {
+    const backoff = [3,5,8,12,20,30];
+    const runs: ExportRun[] = await exportConnectionService.listRuns(connId);
+    const latest = runs[0]; // Assuming newest first; adjust if needed
+    if (!latest) {
+      if (attempt < backoff.length) setTimeout(()=>pollRunsList(connId, versionId, attempt+1), backoff[attempt]*1000); else setExportingId(null);
+      return;
+    }
+    const state = latest.state.toLowerCase();
+    if (state === 'completed') {
+      // success or failure?
+      if (latest.result && latest.result.toLowerCase() !== 'success') {
+        alert('IFC export run failed');
+        setExportingId(null); return;
+      }
+      // output saved to storage automatically if folder selected; attempt to locate by listing folder (best-effort)
+      // Root export: file should appear in default storage root (not enumerated here).
+      setExportingId(null);
+      return;
+    }
+    if (state === 'failed') {
+      alert('IFC export run failed'); setExportingId(null); return;
+    }
+    const nextDelay = backoff[Math.min(attempt, backoff.length-1)] * 1000;
+    setTimeout(()=>pollRunsList(connId, versionId, attempt+1), nextDelay);
+  };
+
+  const mapIfcVersion = (v: 'IFC2X3' | 'IFC4' | 'IFC4X3'): CreateRunRequest['ifcVersion'] => {
+    // Map simplified selector to accepted labels from tutorial
+    switch (v) {
+      case 'IFC2X3': return 'IFC2x3';
+      case 'IFC4X3': return 'IFC4.3';
+      case 'IFC4':
+      default: return 'IFC4 RV 1.2';
+    }
+  };
+
+  // AuthorizationInformation check (initial)
+  const checkAuthorization = async () => {
+    try {
+      setAuthChecking(true);
+      const origin = window.location.origin;
+      const info = await exportAuthorizationService.getAuthorizationInformation(origin);
+      if (info) {
+        setIsUserAuthorized(info.isUserAuthorized);
+        setAuthorizationUrl(info._links?.authorizationUrl?.href || null);
+      } else {
+        setIsUserAuthorized(null);
+        setAuthorizationUrl(null);
+      }
+      setIsAuthChecked(true);
+    } catch (e) {
+      console.warn('AuthorizationInformation request failed', e);
+      setIsUserAuthorized(null);
+      setAuthorizationUrl(null);
+      setIsAuthChecked(true);
+    } finally {
+      setAuthChecking(false);
+    }
+  };
+
+  // Run once when versions tab data loads
+  useEffect(() => {
+    if (!isAuthChecked && namedVersions.length > 0) {
+      // Fire and forget, user can still trigger manual retry
+      checkAuthorization();
+    }
+  }, [namedVersions, isAuthChecked]);
+
+  // Load storage top-level folders for selection
+  useEffect(() => {
+    const loadFolders = async () => {
+      if (!iTwinId) return;
+      setLoadingFolders(true);
+      try {
+        const top = await storageService.getTopLevel(iTwinId, 50, 0);
+        // Filter only folders
+        const folders = (top.items || []).filter(item => item.type === 'folder').map(f => ({ id: f.id, displayName: f.displayName || f.id }));
+        setStorageFolders(folders);
+        // Keep previously selected if still exists
+        if (selectedFolderId && !folders.find(f=>f.id===selectedFolderId)) {
+          setSelectedFolderId('');
+        }
+      } catch (e) {
+        console.warn('Failed to load storage folders', e);
+      } finally {
+        setLoadingFolders(false);
+      }
+    };
+    loadFolders();
+  }, [iTwinId, selectedFolderId]);
+
+  // Upload to storage disabled for root test
 
   return (
     <div className="container mx-auto p-4 space-y-6">
@@ -264,13 +461,58 @@ export default function IModelVersionsComponent({ iModel, iTwinId }: IModelVersi
         </TabsContent>
 
         <TabsContent value="versions" className="space-y-4">
-          {/* Create Named Version Button */}
-          <div className="flex justify-end">
+          {/* Actions: Create + Export */}
+          <div className="flex flex-col gap-3">
+            <div className="flex justify-between items-center">
             <CreateNamedVersionModal
               iModelId={iModel.id}
               changesets={changesets}
               onNamedVersionCreated={handleNamedVersionCreated}
             />
+            <Button variant="outline" size="sm" onClick={exportNamedVersions} disabled={loading || namedVersions.length===0} title="Export Named Versions JSON">
+              Export JSON
+            </Button>
+            </div>
+            <div className="grid md:grid-cols-3 gap-4 items-end">
+              <div className="space-y-1">
+                <label className="text-xs font-medium">IFC Version</label>
+                <select className="border rounded px-2 py-1 text-sm w-full" value={ifcVersion} onChange={e=>setIfcVersion(e.target.value as 'IFC2X3' | 'IFC4' | 'IFC4X3')}>
+                  <option value="IFC2X3">IFC2X3</option>
+                  <option value="IFC4">IFC4</option>
+                  <option value="IFC4X3">IFC4X3</option>
+                </select>
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-medium flex items-center gap-1"><FolderIcon className="w-3 h-3"/>Storage Folder (optional)</label>
+                <select className="border rounded px-2 py-1 text-sm w-full" value={selectedFolderId} onChange={e=>setSelectedFolderId(e.target.value)} disabled={loadingFolders}>
+                  <option value="">Root (default)</option>
+                  {storageFolders.map(f => (
+                    <option key={f.id} value={f.id}>{f.displayName}</option>
+                  ))}
+                </select>
+                {loadingFolders && <div className="text-[10px] text-muted-foreground">Loading folders…</div>}
+              </div>
+              <div className="text-[11px] text-muted-foreground space-y-1">
+                <div>After the IFC export job finishes you can click IFC to start the export. Storage save is automatic to root currently.</div>
+                {authChecking && <div className="text-xs">Checking export authorization…</div>}
+                {isAuthChecked && isUserAuthorized === false && (
+                  <div className="text-xs text-destructive flex flex-col gap-1">
+                    <span>Long-running export authorization required.</span>
+                    {authorizationUrl && (
+                      <Button variant="destructive" size="sm" onClick={() => window.open(authorizationUrl!, '_blank')}>
+                        Authorize
+                      </Button>
+                    )}
+                    <Button variant="outline" size="sm" onClick={checkAuthorization}>
+                      Retry Authorization
+                    </Button>
+                  </div>
+                )}
+                {isAuthChecked && isUserAuthorized === true && (
+                  <div className="text-xs text-green-600">Authorization confirmed ✔</div>
+                )}
+              </div>
+            </div>
           </div>
           
           {loading ? (
@@ -331,6 +573,21 @@ export default function IModelVersionsComponent({ iModel, iTwinId }: IModelVersi
                           <Download className="w-4 h-4 mr-1" />
                           Download
                         </Button>
+                        {
+                          /* Download link disabled in root test; show only export button */
+                        }
+                        {
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={!!exportingId && exportingId!==version.id}
+                            onClick={()=>startIFCExport(version)}
+                            title="Export IFC"
+                          >
+                            {exportingId === version.id ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <FileOutput className="w-4 h-4 mr-1" />}
+                            {exportingId === version.id ? 'Exporting…' : 'IFC'}
+                          </Button>
+                        }
                       </div>
                     </div>
                   </CardContent>
