@@ -34,9 +34,13 @@ export interface ExportRun {
 
 export interface CreateRunRequest {
   exportType: 'IFC' | 'LandXML';
-  ifcVersion?: 'IFC4.3' | 'IFC2x3' | 'IFC2x3 CV 2.0' | 'IFC4 RV 1.2'; // Per tutorial accepted labels
+  ifcVersion?: 'IFC4.3' | 'IFC2x3' | 'IFC2x3 CV 2.0' | 'IFC4 RV 1.2'; // Accepted IFC labels
   projectId?: string; // iTwin/project id
-  inputOptions?: { changesetId?: string; mappingFileId?: string };
+  inputOptions?: {
+    changesetId?: string;
+    mappingFileId?: string; // Placeholder for future mapping file support
+    savedViewId?: string;   // Saved view selector
+  };
   outputOptions?: {
     folderId?: string;
     replaceOlderFile?: boolean;
@@ -51,12 +55,14 @@ interface CreateConnectionResponse { connection: ExportConnection; }
 interface GetConnectionResponse { connection: ExportConnection; }
 interface ListConnectionsResponse { connections: ExportConnection[]; }
 interface RunListResponse { runs: ExportRun[]; _links?: Record<string, { href: string }> }
+interface RunDetailResponse { run: ExportRun & { jobs?: Array<{ id: string; state?: string; tasks?: Array<{ id: string; phase?: string; state?: string; error?: { code?: string; message?: string; description?: string } }> }> } }
 
 class ExportConnectionService extends BaseAPIClient {
   private ENDPOINTS = {
     CONNECTIONS: '/export/connections',
     CONNECTION: (id: string) => `/export/connections/${id}`,
     RUNS: (id: string) => `/export/connections/${id}/runs`, // plural used for both create (POST) and list (GET)
+    RUN: (connId: string, runId: string) => `/export/connections/${connId}/runs/${runId}`,
   } as const;
 
   async createConnection(body: CreateExportConnectionRequest): Promise<ExportConnection | null> {
@@ -123,6 +129,16 @@ class ExportConnectionService extends BaseAPIClient {
     } catch (e) {
       console.error('Failed to list runs', e);
       return [];
+    }
+  }
+
+  async getRun(connectionId: string, runId: string): Promise<RunDetailResponse['run'] | null> {
+    try {
+      const res = await this.fetch<RunDetailResponse>(this.ENDPOINTS.RUN(connectionId, runId));
+      return res?.run || null;
+    } catch (e) {
+      console.error('Failed to get run detail', e);
+      return null;
     }
   }
 }
