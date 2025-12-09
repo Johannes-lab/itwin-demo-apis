@@ -87,7 +87,10 @@ export default function SynchronizationComponent() {
     localStorage.setItem('recentITwins', JSON.stringify(updated));
   }, []);
 
+  const didInitTwins = useRef(false);
   useEffect(() => {
+    if (didInitTwins.current) return; // guard StrictMode double-invoke
+    didInitTwins.current = true;
     let active = true;
     const load = async () => {
       try {
@@ -630,6 +633,7 @@ export default function SynchronizationComponent() {
                   >
                     <option value="DGN">DGN</option>
                     <option value="IFC">IFC</option>
+                      <option value="NWD">Navisworks NWD</option>
                     <option value="REVIT">Revit</option>
                     <option value="SKETCHUP">SketchUp</option>
                     <option value="3DSMAXFBX">3ds Max FBX</option>
@@ -988,6 +992,7 @@ export default function SynchronizationComponent() {
                   >
                     <option value="DGN">DGN</option>
                     <option value="IFC">IFC</option>
+                      <option value="NWD">Navisworks NWD</option>
                     <option value="REVIT">Revit</option>
                     <option value="SKETCHUP">SketchUp</option>
                     <option value="3DSMAXFBX">3ds Max FBX</option>

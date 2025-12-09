@@ -19,6 +19,7 @@ const items = [
   { title: "Reality Modeling V2", url: "/reality-modeling-v2", icon: Drone },
   { title: "Synchronization", url: "/synchronization", icon: Repeat2 },
   { title: "Storage", url: "/storage", icon: Folder },
+    { title: "Forms", url: "/forms", icon: Folder },
 ];
 
 function AppSidebar() {

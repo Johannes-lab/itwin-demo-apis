@@ -141,11 +141,18 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
           return iTwinsList;
         });
         // Apply preselected only once
-        if (!appliedPreselectedRef.current && preselectedITwinId && iTwinsList.length > 0) {
-          const preselectedITwin = iTwinsList.find(t => t.id === preselectedITwinId);
-          if (preselectedITwin) {
-            setITwinSearch(preselectedITwin.displayName);
-            addToRecentITwins(preselectedITwin);
+        if (!appliedPreselectedRef.current && iTwinsList.length > 0) {
+          // Prefer persisted selection
+          const savedId = localStorage.getItem('storageSelectedITwinId');
+          const savedName = localStorage.getItem('storageSelectedITwinName');
+          const targetId = savedId || preselectedITwinId || '';
+          if (targetId) {
+            const sel = iTwinsList.find(t => t.id === targetId);
+            if (sel) {
+              setSelectedITwinId(sel.id);
+              setITwinSearch(savedName || sel.displayName);
+              addToRecentITwins(sel);
+            }
           }
           appliedPreselectedRef.current = true;
         }
@@ -161,6 +168,23 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
     // Only depend on preselected id (addToRecentITwins is stable now)
   }, [preselectedITwinId, addToRecentITwins]);
 
+  // Manual refresh for iTwins in case auto-load fails
+  const refreshITwins = async () => {
+    if (loadingITwinsRef.current) return;
+    loadingITwinsRef.current = true;
+    try {
+      setLoadingITwins(true); setError(null);
+      const data = await iTwinApiService.getMyiTwins();
+      const iTwinsList = Array.isArray(data) ? data : [];
+      setITwins(iTwinsList);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load iTwins');
+    } finally {
+      setLoadingITwins(false);
+      loadingITwinsRef.current = false;
+    }
+  };
+
   // Auto-load storage when iTwin is selected
   useEffect(() => {
     if (selectedITwinId) {
@@ -175,6 +199,11 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
     setITwinSearch(iTwin.displayName);
     addToRecentITwins(iTwin);
     setShowDropdown(false);
+    // Persist selection for Storage section
+    try {
+      localStorage.setItem('storageSelectedITwinId', iTwin.id);
+      localStorage.setItem('storageSelectedITwinName', iTwin.displayName);
+    } catch {}
   };
 
   // Load top-level storage for selected iTwin
@@ -827,6 +856,29 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
                   disabled={loadingITwins}
                   autoComplete="off"
                 />
+                {/* Clear selection button */}
+                {selectedITwinId && (
+                  <button
+                    type="button"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    title="Clear selected iTwin"
+                    onMouseDown={e => e.preventDefault()}
+                    onClick={() => {
+                      setSelectedITwinId("");
+                      setITwinSearch("");
+                      setShowDropdown(false);
+                      try {
+                        localStorage.removeItem('storageSelectedITwinId');
+                        localStorage.removeItem('storageSelectedITwinName');
+                      } catch {}
+                    }}
+                  >
+                    ✕
+                  </button>
+                )}
+                {error && (
+                  <div className="mt-1 text-xs text-destructive">{error}</div>
+                )}
                 {/* Autocomplete dropdown */}
                 {(showDropdown && !loadingITwins) && (
                   <div className="absolute z-10 bg-white border rounded shadow w-full max-h-48 overflow-auto">
@@ -883,6 +935,10 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
               <Button onClick={loadTopLevel} disabled={!selectedITwinId || loading}>
                 {loading && <Loader2 className="h-4 w-4 mr-2 animate-spin"/>}
                 Load Storage
+              </Button>
+              <Button variant="outline" onClick={refreshITwins} disabled={loadingITwins} title="Refresh iTwins list">
+                {loadingITwins ? <Loader2 className="h-4 w-4 mr-2 animate-spin"/> : null}
+                Refresh iTwins
               </Button>
             </div>
           </div>
