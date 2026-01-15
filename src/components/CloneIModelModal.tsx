@@ -179,7 +179,7 @@ export const CloneIModelModal: React.FC<CloneIModelModalProps> = ({
 
       const result = await iModelService.cloneIModel(iModel.id, cloneRequest);
       
-      if (result && result.success) {
+      if (result && 'success' in result && result.success) {
         console.log('iModel clone operation started:', result);
         // Show success message explaining it's an async operation
         setErrors({ 

@@ -6,6 +6,7 @@ import { Label } from './ui/label';
 import { Button } from './ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from './ui/dialog';
 import { iTwinApiService, synchronizationService, storageService } from '../services';
+import { useAuth } from '../hooks/useAuth';
 import { iModelApiService } from '../services/api';
 import type { iTwin } from '../services/iTwinAPIService';
 import type { ManifestConnection, StorageListItem, StorageFile, ManifestRunCreateRequest } from '../services/types';
@@ -16,6 +17,7 @@ export default function SynchronizationComponent() {
   const [iTwins, setITwins] = useState<iTwin[]>([]);
   const [iTwinsLoading, setITwinsLoading] = useState(false);
   const [selectedITwinId, setSelectedITwinId] = useState('');
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
   // Manifest connection iTwin search (replaces simple select)
   const [manifestITwinSearch, setManifestITwinSearch] = useState('');
   const [manifestShowITwinDropdown, setManifestShowITwinDropdown] = useState(false);
@@ -87,14 +89,13 @@ export default function SynchronizationComponent() {
     localStorage.setItem('recentITwins', JSON.stringify(updated));
   }, []);
 
-  const didInitTwins = useRef(false);
   useEffect(() => {
-    if (didInitTwins.current) return; // guard StrictMode double-invoke
-    didInitTwins.current = true;
     let active = true;
     const load = async () => {
+      if (authLoading || !isAuthenticated) return;
       try {
-        setITwinsLoading(true); setError(null);
+        setITwinsLoading(true);
+        setError(null);
         const res = await iTwinApiService.getMyiTwins();
         if (!active) return;
         setITwins(Array.isArray(res) ? res : []);
@@ -102,11 +103,13 @@ export default function SynchronizationComponent() {
         if (!active) return;
         const msg = e instanceof Error ? e.message : 'Failed to load iTwins';
         setError(msg);
-      } finally { if (active) setITwinsLoading(false); }
+      } finally {
+        if (active) setITwinsLoading(false);
+      }
     };
     load();
     return () => { active = false; };
-  }, []);
+  }, [isAuthenticated, authLoading]);
 
   // Click outside handler for manifest & storage dropdowns
   useEffect(() => {
@@ -631,20 +634,13 @@ export default function SynchronizationComponent() {
                     onChange={e => setManifestConnectorType(e.target.value)}
                     className="w-full border rounded px-2 py-1 text-sm bg-background"
                   >
-                    <option value="DGN">DGN</option>
                     <option value="IFC">IFC</option>
-                      <option value="NWD">Navisworks NWD</option>
+                    <option value="DGN">DGN</option>
+                    <option value="NWD">Navisworks NWD</option>
                     <option value="REVIT">Revit</option>
-                    <option value="SKETCHUP">SketchUp</option>
-                    <option value="3DSMAXFBX">3ds Max FBX</option>
-                    <option value="ARCHICAD">ArchiCAD</option>
-                    <option value="DWGIGDS">DWG</option>
-                    <option value="CITYGML">CityGML</option>
-                    <option value="GBXML">gbXML</option>
-                    <option value="IES">IES</option>
-                    <option value="RHINO">Rhino</option>
-                    <option value="CITYJSON">CityJSON</option>
-                    <option value="SPECKLE">Speckle</option>
+                    <option value="DWG">DWG</option>
+                    <option value="CIVIL">Civil</option>
+                    <option value="CIVIL3D">Civil3D</option>
                   </select>
                   <p className="text-[10px] text-muted-foreground">Used only when SAS URL supplied.</p>
                 </div>
@@ -990,20 +986,13 @@ export default function SynchronizationComponent() {
                     onChange={e => setConnectorType(e.target.value)} 
                     className="w-full border rounded px-2 py-1 text-sm bg-background"
                   >
-                    <option value="DGN">DGN</option>
                     <option value="IFC">IFC</option>
-                      <option value="NWD">Navisworks NWD</option>
+                    <option value="DGN">DGN</option>
+                    <option value="NWD">Navisworks NWD</option>
                     <option value="REVIT">Revit</option>
-                    <option value="SKETCHUP">SketchUp</option>
-                    <option value="3DSMAXFBX">3ds Max FBX</option>
-                    <option value="ARCHICAD">ArchiCAD</option>
-                    <option value="DWGIGDS">DWG</option>
-                    <option value="CITYGML">CityGML</option>
-                    <option value="GBXML">gbXML</option>
-                    <option value="IES">IES</option>
-                    <option value="RHINO">Rhino</option>
-                    <option value="CITYJSON">CityJSON</option>
-                    <option value="SPECKLE">Speckle</option>
+                    <option value="DWG">DWG</option>
+                    <option value="CIVIL">Civil</option>
+                    <option value="CIVIL3D">Civil3D</option>
                   </select>
                 </div>
               </div>

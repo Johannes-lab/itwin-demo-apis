@@ -203,7 +203,9 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
     try {
       localStorage.setItem('storageSelectedITwinId', iTwin.id);
       localStorage.setItem('storageSelectedITwinName', iTwin.displayName);
-    } catch {}
+    } catch (error) {
+      console.warn('Failed to persist iTwin selection:', error);
+    }
   };
 
   // Load top-level storage for selected iTwin
@@ -870,7 +872,10 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
                       try {
                         localStorage.removeItem('storageSelectedITwinId');
                         localStorage.removeItem('storageSelectedITwinName');
-                      } catch {}
+                      } catch (error) {
+                        // Ignore localStorage errors - not critical for app functionality
+                        console.warn('Failed to clear localStorage:', error);
+                      }
                     }}
                   >
                     ✕
