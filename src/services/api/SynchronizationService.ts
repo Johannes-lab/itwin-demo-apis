@@ -1,6 +1,6 @@
 import { BaseAPIClient } from "../base/BaseAPIClient";
 import { API_CONFIG } from "../config/api.config";
-import type { ManifestConnectionCreateRequest, ManifestConnectionResponse, ManifestRunCreateRequest, ManifestRunResponse, ManifestConnection } from "../types";
+import type { ManifestConnectionCreateRequest, ManifestConnectionResponse, ManifestRunCreateRequest, ManifestRunResponse, ManifestConnection, SyncReportResponse } from "../types";
 
 type ConnectionSummary = { id: string; displayName?: string };
 type ConnectionsList = { connections?: ConnectionSummary[] };
@@ -24,6 +24,30 @@ class SynchronizationService extends BaseAPIClient {
   async createManifestConnectionRun(connectionId: string, body?: ManifestRunCreateRequest): Promise<Response> {
     // For create run, we care about Location header and 202/303. Use fetch directly to access raw response.
     const token = await (await import('../AuthService')).authService.getAccessToken();
+    const url = `${API_CONFIG.BASE_URL}${API_CONFIG.ENDPOINTS.SYNCHRONIZATION.MANIFEST_RUNS(connectionId)}`;
+    const serializedBody = body ? JSON.stringify(body) : undefined;
+    console.debug('[createManifestConnectionRun] outgoing request:', {
+      url,
+      method: 'POST',
+      headers: { Accept: API_CONFIG.DEFAULT_HEADERS.Accept, 'Content-Type': 'application/json' },
+      body: serializedBody,
+    });
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Accept: API_CONFIG.DEFAULT_HEADERS.Accept,
+        Authorization: `${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: serializedBody,
+      redirect: 'manual',
+    });
+    return res;
+  }
+
+  async triggerUnmapRun(connectionId: string, sourceFileId: string, connectorType: string): Promise<Response> {
+    const token = await (await import('../AuthService')).authService.getAccessToken();
+    const body = { sourceFiles: [{ id: sourceFileId, action: 'unmap', connectorType }] };
     const res = await fetch(`${API_CONFIG.BASE_URL}${API_CONFIG.ENDPOINTS.SYNCHRONIZATION.MANIFEST_RUNS(connectionId)}`, {
       method: 'POST',
       headers: {
@@ -31,7 +55,7 @@ class SynchronizationService extends BaseAPIClient {
         Authorization: `${token}`,
         'Content-Type': 'application/json'
       },
-      body: body ? JSON.stringify(body) : undefined,
+      body: JSON.stringify(body),
       redirect: 'manual',
     });
     return res;
@@ -43,7 +67,15 @@ class SynchronizationService extends BaseAPIClient {
   }
 
   async getManifestRun(connectionId: string, runId: string): Promise<ManifestRunResponse> {
-    return this.fetch<ManifestRunResponse>(API_CONFIG.ENDPOINTS.SYNCHRONIZATION.MANIFEST_RUN(connectionId, runId));
+    const res = await this.fetch<ManifestRunResponse>(API_CONFIG.ENDPOINTS.SYNCHRONIZATION.MANIFEST_RUN(connectionId, runId));
+    console.debug('[getManifestRun] FULL response:', JSON.stringify(res, null, 2));
+    return res;
+  }
+
+  async getReport(iModelId: string, runId: string): Promise<SyncReportResponse> {
+    const res = await this.fetch<SyncReportResponse>(API_CONFIG.ENDPOINTS.SYNCHRONIZATION.REPORTS(iModelId, runId));
+    console.debug('[getReport] FULL response:', JSON.stringify(res, null, 2));
+    return res;
   }
 
   // Generic connections list (used to find an existing StorageConnection by name)

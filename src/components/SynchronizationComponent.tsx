@@ -9,9 +9,28 @@ import { iTwinApiService, synchronizationService, storageService } from '../serv
 import { useAuth } from '../hooks/useAuth';
 import { iModelApiService } from '../services/api';
 import type { iTwin } from '../services/iTwinAPIService';
-import type { ManifestConnection, StorageListItem, StorageFile, ManifestRunCreateRequest } from '../services/types';
+import type { ManifestConnection, StorageListItem, StorageFile, ManifestRunCreateRequest, CreateManifestRunSourceFile, RunTask, SyncReportResponse } from '../services/types';
 import type { CreateIModelRequest } from '../services/types/imodel.types';
 import { BlockBlobClient } from '@azure/storage-blob';
+
+interface RunHistoryEntry {
+  id: string;
+  timestamp: number;
+  connectionId: string;
+  iModelId: string;
+  sourceFileId: string;
+  action: 'bridge' | 'unmap';
+  runBody: ManifestRunCreateRequest;
+  runId: string | null;
+  state?: string;
+  result?: string;
+  errorKey?: string;
+  description?: string;
+  tasks?: RunTask[];
+  rawRunResponse?: unknown;
+  report?: SyncReportResponse | null;
+  fetching?: boolean;
+}
 
 export default function SynchronizationComponent() {
   // Basic skeleton state for creating a Manifest Connection and starting a Run
@@ -34,16 +53,55 @@ export default function SynchronizationComponent() {
   const [newManifestIModelDescription, setNewManifestIModelDescription] = useState('');
   const [creatingManifestIModel, setCreatingManifestIModel] = useState(false);
   const [displayName, setDisplayName] = useState('');
-  // Manifest source file container name (sourceFileId per Manifest Connection API spec)
-  const [sourceFileId, setSourceFileId] = useState('');
-  // Optional SAS URL to send an explicit run body (otherwise omit and server uses registered source file)
-  const [manifestSourceFileSasUrl, setManifestSourceFileSasUrl] = useState('');
-  // Connector type for manifest run body when SAS URL is provided
+  // Per-file entries for Stage 1: tracking id (sourceFiles[].id) + pre-authenticated blob URL (sourceFiles[].url)
+  const [manifestSourceFiles, setManifestSourceFiles] = useState<Array<{id: string; url: string}>>([{id: '', url: ''}]);
+  // Files registered on the connection after successful creation (id + url preserved for run payloads)
+  const [connectionSourceFiles, setConnectionSourceFiles] = useState<Array<{id: string; url: string}>>([]);
+  // Stage 2 bridge run picker — which registered source file to target
+  const [selectedBridgeFileId, setSelectedBridgeFileId] = useState('');
+  // Stage 3 unmap picker — which registered source file to unmap
+  const [selectedUnmapFileId, setSelectedUnmapFileId] = useState('');
+  // Connector type for manifest run body
   const [manifestConnectorType, setManifestConnectorType] = useState('MSTN');
+  // A/B test controls: masterFile.name and documentAttribute in run body
+  const [manifestMasterFileName, setManifestMasterFileName] = useState('');
+  const [manifestUserLabel, setManifestUserLabel] = useState('');
+  const [manifestCodeValue, setManifestCodeValue] = useState('');
+  const [manifestDocumentAttributeClassName, setManifestDocumentAttributeClassName] = useState('DocumentMetadata:DocumentLink');
+  const [omitDocumentAttribute, setOmitDocumentAttribute] = useState(false);
+  // Per-file CodeValue registry — built from Stage 2 entries, used to auto-suggest in Stage 3
+  const [fileCodeValues, setFileCodeValues] = useState<Record<string, string>>({});
+  // Stage 3 unmap A/B test controls — independent from Stage 2 so you can compare bridge vs. unmap payloads
+  const [unmapMasterFileName, setUnmapMasterFileName] = useState('');
+  const [unmapUserLabel, setUnmapUserLabel] = useState('');
+  const [unmapCodeValue, setUnmapCodeValue] = useState('');
+  const [unmapDocumentAttributeClassName, setUnmapDocumentAttributeClassName] = useState('DocumentMetadata:DocumentLink');
+  const [omitUnmapDocumentAttribute, setOmitUnmapDocumentAttribute] = useState(false);
+  const [showUnmapAdvanced, setShowUnmapAdvanced] = useState(false);
+  // Explicit run-body source file id — sticky across bridge and unmap runs.
+  // Empty = fall back to the connection's Source File Id field above.
+  const [manifestRunSourceFileId, setManifestRunSourceFileId] = useState('');
+  const [showManifestAdvanced, setShowManifestAdvanced] = useState(false);
+  const [lastRunBody, setLastRunBody] = useState<object | null>(null);
+  // Full raw JSON from the most recent getManifestRun call — captured for diagnosis
+  const [manifestRunRaw, setManifestRunRaw] = useState<unknown | null>(null);
+  // Persistent run history for this session (bridge + unmap, newest first)
+  const [runHistory, setRunHistory] = useState<RunHistoryEntry[]>([]);
+  const [manifestRunPoll, setManifestRunPoll] = useState<null | {
+    connectionId: string; runId: string; iModelId: string;
+    type: 'bridge' | 'unmap'; polling: boolean;
+    state?: string; result?: string;
+    startDateTime?: string; endDateTime?: string;
+    errorKey?: string; description?: string; tasks?: RunTask[];
+  }>(null);
+  const [manifestRunReport, setManifestRunReport] = useState<SyncReportResponse | null>(null);
+  const [storageRunReport, setStorageRunReport] = useState<SyncReportResponse | null>(null);
   const [creating, setCreating] = useState(false);
   const [createdConnection, setCreatedConnection] = useState<ManifestConnection | null>(null);
   const [runSubmitting, setRunSubmitting] = useState(false);
   const [runLocation, setRunLocation] = useState<string | null>(null);
+  const [unmapSubmitting, setUnmapSubmitting] = useState(false);
+  const [unmapLocation, setUnmapLocation] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Storage Connection state
@@ -248,6 +306,108 @@ export default function SynchronizationComponent() {
     }, nextDelay);
     autoPollTimersRef.current.set(jobId, timerId);
   };
+
+  const MANIFEST_TERMINAL_STATES = new Set(['completed', 'succeeded', 'failed', 'error', 'canceled', 'cancelled']);
+
+  const pollManifestRun = async (connectionId: string, runId: string, iModelId: string, type: 'bridge' | 'unmap', attempt: number) => {
+    try {
+      const res = await synchronizationService.getManifestRun(connectionId, runId);
+      console.debug('[pollManifestRun] attempt', attempt, 'FULL raw response:', JSON.stringify(res, null, 2));
+      setManifestRunRaw(res);
+      const run = res?.run;
+      const state = (run?.state || '').toLowerCase();
+      // Terminal check: state only — endDateTime alone is not reliable because the API can return
+      // a stale endDateTime from a prior run on the same connection while state is still NotStarted.
+      const done = MANIFEST_TERMINAL_STATES.has(state);
+      console.debug('[pollManifestRun] attempt', attempt, 'parsed:', { runId, state: run?.state, result: run?.result, errorKey: run?.errorKey, taskCount: run?.tasks?.length, done });
+
+      setManifestRunPoll({
+        connectionId, runId, iModelId, type,
+        polling: !done,
+        state: run?.state, result: run?.result,
+        startDateTime: run?.startDateTime, endDateTime: run?.endDateTime,
+        errorKey: run?.errorKey, description: run?.description, tasks: run?.tasks,
+      });
+
+      // Mirror poll results into the matching history entry so it stays live
+      setRunHistory(prev => prev.map(e => e.runId === runId ? {
+        ...e,
+        state: run?.state,
+        result: run?.result,
+        ...(done ? { errorKey: run?.errorKey, description: run?.description, tasks: run?.tasks, rawRunResponse: res } : {}),
+      } : e));
+
+      if (done) {
+        stopJobPolling('manifest');
+        try {
+          const report = await synchronizationService.getReport(iModelId, runId);
+          setManifestRunReport(report);
+          setRunHistory(prev => prev.map(e => e.runId === runId ? { ...e, report } : e));
+        } catch { /* non-fatal — run detail already has task info */ }
+        return;
+      }
+    } catch (e) {
+      console.debug('[pollManifestRun] attempt', attempt, 'fetch error:', e);
+      setManifestRunPoll(prev => prev ? { ...prev, polling: true, state: 'Polling error' } : prev);
+    }
+
+    const backoff = [2, 3, 5, 8, 13, 21, 30, 30, 30];
+    const nextDelay = (backoff[Math.min(attempt, backoff.length - 1)] || 30) * 1000;
+    const timerId = window.setTimeout(() => {
+      void pollManifestRun(connectionId, runId, iModelId, type, attempt + 1);
+    }, nextDelay);
+    autoPollTimersRef.current.set('manifest', timerId);
+  };
+
+  const refreshManifestRunStatus = async () => {
+    if (!manifestRunPoll) return;
+    const { connectionId, runId, iModelId, type } = manifestRunPoll;
+    stopJobPolling('manifest');
+    try {
+      const res = await synchronizationService.getManifestRun(connectionId, runId);
+      console.debug('[refreshManifestRunStatus] FULL raw response:', JSON.stringify(res, null, 2));
+      setManifestRunRaw(res);
+      const run = res?.run;
+      const state = (run?.state || '').toLowerCase();
+      const done = MANIFEST_TERMINAL_STATES.has(state);
+      console.debug('[refreshManifestRunStatus] parsed:', { state: run?.state, result: run?.result, errorKey: run?.errorKey, taskCount: run?.tasks?.length, done });
+      setManifestRunPoll({
+        connectionId, runId, iModelId, type,
+        polling: !done,
+        state: run?.state, result: run?.result,
+        startDateTime: run?.startDateTime, endDateTime: run?.endDateTime,
+        errorKey: run?.errorKey, description: run?.description, tasks: run?.tasks,
+      });
+      if (!done) {
+        void pollManifestRun(connectionId, runId, iModelId, type, 0);
+      } else {
+        try {
+          const report = await synchronizationService.getReport(iModelId, runId);
+          setManifestRunReport(report);
+        } catch { /* non-fatal */ }
+      }
+    } catch (e) {
+      console.debug('[refreshManifestRunStatus] fetch error:', e);
+    }
+  };
+
+  const fetchHistoryEntryStatus = useCallback(async (entryId: string, connectionId: string, iModelId: string, runId: string) => {
+    setRunHistory(prev => prev.map(e => e.id === entryId ? { ...e, fetching: true } : e));
+    try {
+      const res = await synchronizationService.getManifestRun(connectionId, runId);
+      const run = res?.run;
+      let report: SyncReportResponse | null = null;
+      try { report = await synchronizationService.getReport(iModelId, runId); } catch { /* non-fatal */ }
+      setRunHistory(prev => prev.map(e => e.id === entryId ? {
+        ...e, fetching: false,
+        state: run?.state, result: run?.result,
+        errorKey: run?.errorKey, description: run?.description, tasks: run?.tasks,
+        rawRunResponse: res, report,
+      } : e));
+    } catch {
+      setRunHistory(prev => prev.map(e => e.id === entryId ? { ...e, fetching: false } : e));
+    }
+  }, []);
 
   const getAutoFolderCacheKey = (iTwinId: string) => `sync-auto-folder-${iTwinId}`;
 
@@ -501,6 +661,7 @@ export default function SynchronizationComponent() {
         const runId = parseRunIdFromLocation(runLoc);
         if (runId) {
           setAutoBatchRun({ connectionId: conn.id, runId, polling: true });
+          setStorageRunReport(null);
           void pollStorageRun('batch', conn.id, runId, 0);
         }
       }
@@ -572,6 +733,17 @@ export default function SynchronizationComponent() {
     };
   }, []);
 
+  // Fetch storage run report when batch run ends in error
+  useEffect(() => {
+    if (!autoBatchRun || autoBatchRun.polling) return;
+    if (!['error', 'failed'].includes((autoBatchRun.result || '').toLowerCase())) return;
+    if (!autoBatchResult?.iModelId || !autoBatchRun.runId) return;
+    if (storageRunReport) return;
+    synchronizationService.getReport(autoBatchResult.iModelId, autoBatchRun.runId)
+      .then(r => setStorageRunReport(r))
+      .catch(() => {});
+  }, [autoBatchRun, autoBatchResult, storageRunReport]);
+
   // Load manifest iModels when selected iTwin changes
   useEffect(() => {
     const load = async () => {
@@ -596,6 +768,22 @@ export default function SynchronizationComponent() {
     };
     load();
   }, [selectedITwinId]);
+
+  // Record Stage 2 CodeValue per file so Stage 3 can auto-suggest the same value
+  useEffect(() => {
+    if (selectedBridgeFileId && manifestCodeValue.trim()) {
+      setFileCodeValues(prev => ({ ...prev, [selectedBridgeFileId]: manifestCodeValue.trim() }));
+    }
+  }, [manifestCodeValue, selectedBridgeFileId]);
+
+  // Auto-suggest Stage 3 CodeValue when file selection matches a Stage 2 entry and field is blank
+  useEffect(() => {
+    if (!selectedUnmapFileId) return;
+    const suggested = fileCodeValues[selectedUnmapFileId];
+    if (suggested && !unmapCodeValue.trim()) {
+      setUnmapCodeValue(suggested);
+    }
+  }, [selectedUnmapFileId, fileCodeValues]);
 
   // Function to load iModels for selected iTwin
   const loadIModels = async (iTwinId: string) => {
@@ -813,64 +1001,229 @@ export default function SynchronizationComponent() {
     }
   };
 
-  const canCreate = !!manifestIModelId && !!sourceFileId && !creating;
-  const canRun = !!createdConnection && !runSubmitting;
+  const renderDiagnosticPanel = (
+    errorKey: string | undefined,
+    runDescription: string | undefined,
+    tasks: RunTask[] | undefined,
+    report: SyncReportResponse | null,
+    rawRun?: unknown,
+  ) => {
+    const hasContent = errorKey || runDescription || tasks?.length || report || rawRun;
+    if (!hasContent) return null;
+    return (
+      <div className="mt-2 rounded border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/20 p-3 space-y-2 text-xs">
+        <div className="font-semibold text-red-700 dark:text-red-400">Run diagnostics</div>
+        {errorKey && (
+          <div><span className="text-muted-foreground">Error key:</span> <code className="bg-muted px-1 rounded">{errorKey}</code></div>
+        )}
+        {runDescription && (
+          <div><span className="text-muted-foreground">Description:</span> {runDescription}</div>
+        )}
+        {tasks && tasks.length > 0 && (
+          <div className="space-y-2">
+            <div className="font-medium">Tasks ({tasks.length})</div>
+            {tasks.map((t, i) => (
+              <div key={t.id ?? i} className="pl-3 border-l-2 border-red-300 dark:border-red-700 space-y-0.5">
+                {t.state      && <div><span className="text-muted-foreground w-28 inline-block">State:</span> {t.state}</div>}
+                {t.result     && <div><span className="text-muted-foreground w-28 inline-block">Result:</span> {t.result}</div>}
+                {t.phase      && <div><span className="text-muted-foreground w-28 inline-block">Phase:</span> {t.phase}</div>}
+                {t.system     && <div><span className="text-muted-foreground w-28 inline-block">System:</span> {t.system}</div>}
+                {t.category   && <div><span className="text-muted-foreground w-28 inline-block">Category:</span> {t.category}</div>}
+                {t.errorCode  && <div><span className="text-muted-foreground w-28 inline-block">Error code:</span> <code className="bg-muted px-1 rounded">{t.errorCode}</code></div>}
+                {t.bridgeExitCode !== undefined && (
+                  <div><span className="text-muted-foreground w-28 inline-block">Bridge exit:</span> <code className="bg-muted px-1 rounded">{t.bridgeExitCode}</code></div>
+                )}
+                {t.descriptionKey && <div><span className="text-muted-foreground w-28 inline-block">Description key:</span> <code className="bg-muted px-1 rounded">{t.descriptionKey}</code></div>}
+                {t.message    && <div><span className="text-muted-foreground w-28 inline-block">Message:</span> {t.message}</div>}
+                {t.description && <div><span className="text-muted-foreground w-28 inline-block">Description:</span> {t.description}</div>}
+                {t.details    && <div><span className="text-muted-foreground w-28 inline-block">Details:</span> <span className="whitespace-pre-wrap">{t.details}</span></div>}
+              </div>
+            ))}
+          </div>
+        )}
+        {!tasks?.length && !errorKey && !runDescription && rawRun && (
+          <div className="text-muted-foreground italic text-[10px]">
+            No errorKey/description/tasks in run response — check raw run below to see what the API returned.
+          </div>
+        )}
+        {rawRun && (
+          <details open={!tasks?.length && !errorKey}>
+            <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
+              View raw run response (getManifestRun{tasks?.length ? `, ${tasks.length} task(s) expanded` : ' — no tasks'})
+            </summary>
+            <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-all text-[10px] bg-muted p-1.5 rounded">
+              {JSON.stringify(rawRun, null, 2)}
+            </pre>
+          </details>
+        )}
+        {report && (
+          <details>
+            <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">View raw report (/synchronization/reports)</summary>
+            <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-all text-[10px] bg-muted p-1.5 rounded">
+              {JSON.stringify(report, null, 2)}
+            </pre>
+          </details>
+        )}
+      </div>
+    );
+  };
+
+  const canCreate = !!manifestIModelId && manifestSourceFiles.some(f => !!f.id.trim()) && !creating;
+  const manifestRunBusy = runSubmitting || unmapSubmitting;
+  const bridgeNameMissing = !manifestMasterFileName.trim();
+  const canRun = !!createdConnection && !manifestRunBusy && !bridgeNameMissing;
+  const lastBridgeSucceeded = manifestRunPoll?.type === 'bridge' && manifestRunPoll?.result?.toLowerCase() === 'success';
+  const canUnmap = !!createdConnection && !manifestRunBusy && !!lastBridgeSucceeded;
 
   const createConnection = async () => {
     try {
       setCreating(true); setError(null); setRunLocation(null);
+      setManifestRunPoll(null); setManifestRunReport(null);
+      setConnectionSourceFiles([]);
+      const validFiles = manifestSourceFiles.filter(f => f.id.trim());
       const conn = await synchronizationService.createManifestConnection({
         displayName: displayName || undefined,
         iModelId: manifestIModelId.trim(),
         authenticationType: 'User',
-        sourceFiles: [{ sourceFileId: sourceFileId.trim() }],
+        sourceFiles: validFiles.map(f => ({ sourceFileId: f.id.trim() })),
       });
       setCreatedConnection(conn);
+      const registered = validFiles.map(f => ({ id: f.id.trim(), url: f.url.trim() }));
+      setConnectionSourceFiles(registered);
+      setSelectedBridgeFileId(registered[0]?.id || '');
+      setSelectedUnmapFileId(registered[0]?.id || '');
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to create connection';
       setError(msg);
     } finally { setCreating(false); }
   };
 
+  // Reads error body from a non-2xx run-creation response and returns a human-readable string.
+  // Surfaces error.details[] from InvalidManifestConnectionRunRequest responses.
+  const parseRunError = async (res: Response): Promise<string> => {
+    try {
+      const body: unknown = await res.clone().json();
+      console.error(`Run creation error (HTTP ${res.status}):`, body);
+      const err = (body as Record<string, unknown>)?.error as Record<string, unknown> | undefined;
+      const details = err?.details;
+      if (Array.isArray(details) && details.length > 0) {
+        const lines = (details as Record<string, unknown>[]).map(d =>
+          [d.code, d.message].filter(Boolean).join(': ')
+        );
+        return `HTTP ${res.status} — ${err?.message ?? res.statusText}\n${lines.join('\n')}`;
+      }
+      return `HTTP ${res.status} — ${err?.message ?? (body as Record<string, unknown>)?.message ?? res.statusText}`;
+    } catch {
+      return `HTTP ${res.status} — ${res.statusText}`;
+    }
+  };
+
   const startRun = async () => {
     if (!createdConnection) return;
     try {
       setRunSubmitting(true); setError(null); setRunLocation(null);
-      // If a SAS URL is provided, construct a run body overriding source file details
-      let runBody: ManifestRunCreateRequest | undefined;
-      if (manifestSourceFileSasUrl.trim()) {
-        runBody = {
-          sourceFiles: [
-            {
-              id: sourceFileId.trim(),
-              name: sourceFileId.trim(),
-              action: 'bridge',
-              url: manifestSourceFileSasUrl.trim(),
-              connectorType: manifestConnectorType,
-            }
-          ]
-        };
-      }
+      const effectiveId = manifestRunSourceFileId.trim() || selectedBridgeFileId.trim() || manifestSourceFiles[0]?.id?.trim() || '';
+      // Resolve the SAS URL from the registered file; fall back to the explicit override if id changed
+      const registeredFile = connectionSourceFiles.find(f => f.id === selectedBridgeFileId)
+        ?? connectionSourceFiles.find(f => f.id === effectiveId);
+      const effectiveUrl = registeredFile?.url ?? '';
+      const sourceFile: CreateManifestRunSourceFile = {
+        id: effectiveId,
+        action: 'bridge',
+        connectorType: manifestConnectorType,
+        ...(effectiveUrl ? { url: effectiveUrl } : {}),
+        name: manifestMasterFileName.trim(),
+        // documentAttribute requires className + properties wrapper (additionalProperties: false)
+        ...(!omitDocumentAttribute && (manifestUserLabel.trim() || manifestCodeValue.trim()) ? {
+          documentAttribute: {
+            className: manifestDocumentAttributeClassName.trim() || 'DocumentMetadata:DocumentLink',
+            properties: {
+              ...(manifestUserLabel.trim() ? { userLabel: manifestUserLabel.trim() } : {}),
+              ...(manifestCodeValue.trim() ? { CodeValue: manifestCodeValue.trim() } : {}),
+            },
+          }
+        } : {}),
+      };
+      const runBody: ManifestRunCreateRequest = { sourceFiles: [sourceFile] };
+      setLastRunBody(runBody);
       const res = await synchronizationService.createManifestConnectionRun(createdConnection.id, runBody);
       if (res.status === 202 || res.status === 303) {
         const loc = res.headers.get('Location'); setRunLocation(loc);
-      } else if (res.status === 409) {
-        setError('A run is already being processed for this iModel.');
-      } else if (res.status === 401) {
-        setError('Unauthorized. Check token/scope.');
-      } else if (res.status === 403) {
-        setError('Insufficient permissions.');
-      } else if (res.status === 404) {
-        setError('Connection not found.');
-      } else if (res.status === 422) {
-        setError('Invalid run request.');
+        const runId = loc ? parseRunIdFromLocation(loc) : null;
+        if (runId && createdConnection) {
+          setManifestRunPoll({ connectionId: createdConnection.id, runId, iModelId: createdConnection.iModelId, type: 'bridge', polling: true });
+          setManifestRunReport(null);
+          setManifestRunRaw(null);
+          setRunHistory(prev => [{
+            id: crypto.randomUUID(),
+            timestamp: Date.now(),
+            connectionId: createdConnection.id,
+            iModelId: createdConnection.iModelId,
+            sourceFileId: effectiveId,
+            action: 'bridge',
+            runBody,
+            runId,
+          }, ...prev]);
+          void pollManifestRun(createdConnection.id, runId, createdConnection.iModelId, 'bridge', 0);
+        }
       } else {
-        setError(`Unexpected status ${res.status}`);
+        setError(await parseRunError(res));
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to start run';
       setError(msg);
     } finally { setRunSubmitting(false); }
+  };
+
+  const startUnmap = async () => {
+    if (!createdConnection) return;
+    try {
+      setUnmapSubmitting(true); setError(null); setUnmapLocation(null);
+      const effectiveId = manifestRunSourceFileId.trim() || selectedUnmapFileId.trim() || manifestSourceFiles[0]?.id?.trim() || '';
+      const sourceFile: CreateManifestRunSourceFile = {
+        id: effectiveId,
+        action: 'unmap',
+        connectorType: manifestConnectorType,
+        ...(unmapMasterFileName.trim() ? { name: unmapMasterFileName.trim() } : {}),
+        ...(!omitUnmapDocumentAttribute && (unmapUserLabel.trim() || unmapCodeValue.trim()) ? {
+          documentAttribute: {
+            className: unmapDocumentAttributeClassName.trim() || 'DocumentMetadata:DocumentLink',
+            properties: {
+              ...(unmapUserLabel.trim() ? { userLabel: unmapUserLabel.trim() } : {}),
+              ...(unmapCodeValue.trim() ? { CodeValue: unmapCodeValue.trim() } : {}),
+            },
+          }
+        } : {}),
+      };
+      const runBody: ManifestRunCreateRequest = { sourceFiles: [sourceFile] };
+      setLastRunBody(runBody);
+      const res = await synchronizationService.createManifestConnectionRun(createdConnection.id, runBody);
+      if (res.status === 202 || res.status === 303) {
+        const loc = res.headers.get('Location'); setUnmapLocation(loc);
+        const runId = loc ? parseRunIdFromLocation(loc) : null;
+        if (runId && createdConnection) {
+          setManifestRunPoll({ connectionId: createdConnection.id, runId, iModelId: createdConnection.iModelId, type: 'unmap', polling: true });
+          setManifestRunReport(null);
+          setManifestRunRaw(null);
+          setRunHistory(prev => [{
+            id: crypto.randomUUID(),
+            timestamp: Date.now(),
+            connectionId: createdConnection.id,
+            iModelId: createdConnection.iModelId,
+            sourceFileId: effectiveId,
+            action: 'unmap',
+            runBody,
+            runId,
+          }, ...prev]);
+          void pollManifestRun(createdConnection.id, runId, createdConnection.iModelId, 'unmap', 0);
+        }
+      } else {
+        setError(await parseRunError(res));
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to start unmap';
+      setError(msg);
+    } finally { setUnmapSubmitting(false); }
   };
 
   // Create new iModel for manifest connection
@@ -908,167 +1261,307 @@ export default function SynchronizationComponent() {
             <CardTitle className="flex items-center gap-2"><FileType className="h-4 w-4"/> Manifest Connections</CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-muted-foreground">
-            <div className="space-y-3">
-              <div className="space-y-2">
-                <Label htmlFor="manifest-tw">iTwin</Label>
-                <div className="relative" ref={manifestITwinDropdownRef}>
-                  <Input
-                    id="manifest-tw"
-                    placeholder={iTwinsLoading ? 'Loading iTwins…' : 'Search and select an iTwin…'}
-                    value={manifestITwinSearch}
-                    autoComplete="off"
-                    autoCorrect="off"
-                    autoCapitalize="off"
-                    spellCheck={false}
-                    onChange={(e) => {
-                      setManifestITwinSearch(e.target.value);
-                      setManifestShowITwinDropdown(true);
-                    }}
-                    onFocus={() => setManifestShowITwinDropdown(true)}
-                    disabled={iTwinsLoading}
-                    className="text-sm pr-8"
-                  />
-                  {selectedITwinId && manifestITwinSearch && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedITwinId('');
-                        setManifestITwinSearch('');
-                        setManifestShowITwinDropdown(false);
-                      }}
-                      className="absolute right-2 top-1/2 transform -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                    >
-                      <X className="h-4 w-4" />
-                    </button>
-                  )}
-                  {manifestShowITwinDropdown && !iTwinsLoading && (
-                    <div className="absolute z-10 w-full mt-1 bg-background border rounded-md shadow-lg max-h-60 overflow-auto">
-                      {!manifestITwinSearch && getRecentITwins().length > 0 && (
-                        <>
-                          <div className="px-3 py-2 text-xs font-medium text-muted-foreground bg-muted/50 border-b">
-                            Recent iTwins
-                          </div>
-                          {getRecentITwins().map((recentITwin: iTwin) => (
-                            <div
-                              key={`recent-m-${recentITwin.id}`}
-                              className="px-3 py-2 hover:bg-muted cursor-pointer text-sm border-b border-border/20"
-                              onClick={() => {
-                                setSelectedITwinId(recentITwin.id);
-                                setManifestITwinSearch(`${recentITwin.displayName} (${recentITwin.id.slice(0,8)}…)`);
-                                setManifestShowITwinDropdown(false);
-                                addToRecentITwins(recentITwin);
-                              }}
-                            >
-                              <div className="font-medium">{recentITwin.displayName}</div>
-                              <div className="text-xs text-muted-foreground">{recentITwin.id}</div>
-                            </div>
-                          ))}
-                          {iTwins.length > 0 && (
-                            <div className="px-3 py-2 text-xs font-medium text-muted-foreground bg-muted/50 border-b">
-                              All iTwins (type to search)
-                            </div>
-                          )}
-                        </>
-                      )}
-                      {iTwins
-                        .filter(t => !manifestITwinSearch || t.displayName.toLowerCase().includes(manifestITwinSearch.toLowerCase()) || t.id.toLowerCase().includes(manifestITwinSearch.toLowerCase()))
-                        .slice(0, manifestITwinSearch ? 20 : 10)
-                        .map(t => (
-                          <div
-                            key={t.id}
-                            className="px-3 py-2 hover:bg-muted cursor-pointer text-sm border-b border-border/20 last:border-0"
-                            onClick={() => {
-                              setSelectedITwinId(t.id);
-                              setManifestITwinSearch(`${t.displayName} (${t.id.slice(0,8)}…)`);
-                              setManifestShowITwinDropdown(false);
-                              addToRecentITwins(t);
-                            }}
-                          >
-                            <div className="font-medium">{t.displayName}</div>
-                            <div className="text-xs text-muted-foreground">{t.id}</div>
-                          </div>
-                        ))}
-                      {manifestITwinSearch && iTwins.filter(t => t.displayName.toLowerCase().includes(manifestITwinSearch.toLowerCase()) || t.id.toLowerCase().includes(manifestITwinSearch.toLowerCase())).length === 0 && (
-                        <div className="px-3 py-2 text-sm text-muted-foreground">No iTwins found matching "{manifestITwinSearch}"</div>
-                      )}
-                      {iTwins.length === 0 && !manifestITwinSearch && (
-                        <div className="px-3 py-2 text-sm text-muted-foreground">No iTwins available</div>
+            <div className="space-y-4">
+
+              {/* --- State summary bar --- */}
+              <div className="rounded bg-muted/30 border px-3 py-2 text-xs space-y-0.5">
+                <div className="flex items-center gap-2">
+                  <span className="text-muted-foreground">Connection:</span>
+                  {createdConnection
+                    ? <span className="font-mono text-foreground">{createdConnection.id}</span>
+                    : <span className="italic">not created</span>}
+                </div>
+                {manifestRunPoll && (
+                  <>
+                    <div className="flex items-center gap-2">
+                      <span className="text-muted-foreground">Last run:</span>
+                      <span className="font-mono text-foreground">{manifestRunPoll.runId}</span>
+                      <span className="capitalize">({manifestRunPoll.type})</span>
+                      {manifestRunPoll.polling && <Loader2 className="h-3 w-3 animate-spin" />}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-muted-foreground">Status:</span>
+                      <span>{manifestRunPoll.state ?? '—'}</span>
+                      {manifestRunPoll.result && (
+                        <span className={`font-medium ${manifestRunPoll.result.toLowerCase() === 'success' ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                          → {manifestRunPoll.result}
+                        </span>
                       )}
                     </div>
-                  )}
-                </div>
+                  </>
+                )}
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label htmlFor="manifest-im">iModel<span className="text-red-500 ml-0.5">*</span></Label>
-                  <div className="relative" ref={manifestIModelDropdownRef}>
-                    <Input
-                      id="manifest-im"
-                      placeholder={!selectedITwinId ? 'Select an iTwin first' : manifestIModels.length ? 'Search and select an iModel…' : 'No iModels yet, create one'}
-                      value={manifestIModelSearch}
-                      onChange={(e) => { setManifestIModelSearch(e.target.value); setManifestShowIModelDropdown(true); }}
-                      onFocus={() => selectedITwinId && setManifestShowIModelDropdown(true)}
-                      disabled={!selectedITwinId}
-                      className="text-sm pr-8"
-                    />
-                    {manifestIModelId && manifestIModelSearch && (
-                      <button
-                        type="button"
-                        onClick={() => { setManifestIModelId(''); setManifestIModelSearch(''); setManifestShowIModelDropdown(false); }}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                      >
-                        <X className="h-4 w-4" />
-                      </button>
-                    )}
-                    {manifestShowIModelDropdown && selectedITwinId && (
-                      <div className="absolute z-10 w-full mt-1 bg-background border rounded-md shadow-lg max-h-60 overflow-auto">
-                        <div
-                          className="px-3 py-2 hover:bg-muted cursor-pointer text-sm border-b border-border/20 bg-blue-50 dark:bg-blue-950/20"
-                          onClick={() => { setShowManifestCreateIModelModal(true); setManifestShowIModelDropdown(false); }}
+
+              {/* ======= STAGE 1 — Create Connection ======= */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 pb-0.5 border-b">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground bg-muted px-1.5 py-0.5 rounded">Stage 1</span>
+                  <span className="text-xs font-semibold">Create Connection</span>
+                  {createdConnection && <span className="ml-auto text-[10px] text-green-600 dark:text-green-400 font-medium">✓ Connected</span>}
+                </div>
+
+                <div className={`space-y-3 ${createdConnection ? 'opacity-60 pointer-events-none select-none' : ''}`}>
+                  {/* iTwin dropdown */}
+                  <div className="space-y-2">
+                    <Label htmlFor="manifest-tw">iTwin</Label>
+                    <div className="relative" ref={manifestITwinDropdownRef}>
+                      <Input
+                        id="manifest-tw"
+                        placeholder={iTwinsLoading ? 'Loading iTwins…' : 'Search and select an iTwin…'}
+                        value={manifestITwinSearch}
+                        autoComplete="off"
+                        autoCorrect="off"
+                        autoCapitalize="off"
+                        spellCheck={false}
+                        onChange={(e) => {
+                          setManifestITwinSearch(e.target.value);
+                          setManifestShowITwinDropdown(true);
+                        }}
+                        onFocus={() => setManifestShowITwinDropdown(true)}
+                        disabled={iTwinsLoading}
+                        className="text-sm pr-8"
+                      />
+                      {selectedITwinId && manifestITwinSearch && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedITwinId('');
+                            setManifestITwinSearch('');
+                            setManifestShowITwinDropdown(false);
+                          }}
+                          className="absolute right-2 top-1/2 transform -translate-y-1/2 text-muted-foreground hover:text-foreground"
                         >
-                          <div className="flex items-center gap-2 font-medium text-blue-600 dark:text-blue-400"><Plus className="h-4 w-4" />Create New iModel</div>
-                          <div className="text-xs text-blue-500 dark:text-blue-300">Create a new iModel in this iTwin</div>
+                          <X className="h-4 w-4" />
+                        </button>
+                      )}
+                      {manifestShowITwinDropdown && !iTwinsLoading && (
+                        <div className="absolute z-10 w-full mt-1 bg-background border rounded-md shadow-lg max-h-60 overflow-auto">
+                          {!manifestITwinSearch && getRecentITwins().length > 0 && (
+                            <>
+                              <div className="px-3 py-2 text-xs font-medium text-muted-foreground bg-muted/50 border-b">
+                                Recent iTwins
+                              </div>
+                              {getRecentITwins().map((recentITwin: iTwin) => (
+                                <div
+                                  key={`recent-m-${recentITwin.id}`}
+                                  className="px-3 py-2 hover:bg-muted cursor-pointer text-sm border-b border-border/20"
+                                  onClick={() => {
+                                    setSelectedITwinId(recentITwin.id);
+                                    setManifestITwinSearch(`${recentITwin.displayName} (${recentITwin.id.slice(0,8)}…)`);
+                                    setManifestShowITwinDropdown(false);
+                                    addToRecentITwins(recentITwin);
+                                  }}
+                                >
+                                  <div className="font-medium">{recentITwin.displayName}</div>
+                                  <div className="text-xs text-muted-foreground">{recentITwin.id}</div>
+                                </div>
+                              ))}
+                              {iTwins.length > 0 && (
+                                <div className="px-3 py-2 text-xs font-medium text-muted-foreground bg-muted/50 border-b">
+                                  All iTwins (type to search)
+                                </div>
+                              )}
+                            </>
+                          )}
+                          {iTwins
+                            .filter(t => !manifestITwinSearch || t.displayName.toLowerCase().includes(manifestITwinSearch.toLowerCase()) || t.id.toLowerCase().includes(manifestITwinSearch.toLowerCase()))
+                            .slice(0, manifestITwinSearch ? 20 : 10)
+                            .map(t => (
+                              <div
+                                key={t.id}
+                                className="px-3 py-2 hover:bg-muted cursor-pointer text-sm border-b border-border/20 last:border-0"
+                                onClick={() => {
+                                  setSelectedITwinId(t.id);
+                                  setManifestITwinSearch(`${t.displayName} (${t.id.slice(0,8)}…)`);
+                                  setManifestShowITwinDropdown(false);
+                                  addToRecentITwins(t);
+                                }}
+                              >
+                                <div className="font-medium">{t.displayName}</div>
+                                <div className="text-xs text-muted-foreground">{t.id}</div>
+                              </div>
+                            ))}
+                          {manifestITwinSearch && iTwins.filter(t => t.displayName.toLowerCase().includes(manifestITwinSearch.toLowerCase()) || t.id.toLowerCase().includes(manifestITwinSearch.toLowerCase())).length === 0 && (
+                            <div className="px-3 py-2 text-sm text-muted-foreground">No iTwins found matching "{manifestITwinSearch}"</div>
+                          )}
+                          {iTwins.length === 0 && !manifestITwinSearch && (
+                            <div className="px-3 py-2 text-sm text-muted-foreground">No iTwins available</div>
+                          )}
                         </div>
-                        {manifestIModels
-                          .filter(m => !manifestIModelSearch || m.displayName.toLowerCase().includes(manifestIModelSearch.toLowerCase()) || m.id.toLowerCase().includes(manifestIModelSearch.toLowerCase()))
-                          .slice(0, 20)
-                          .map(m => (
-                            <div
-                              key={m.id}
-                              className="px-3 py-2 hover:bg-muted cursor-pointer text-sm border-b border-border/20 last:border-0"
-                              onClick={() => {
-                                setManifestIModelId(m.id);
-                                setManifestIModelSearch(`${m.displayName} (${m.id.slice(0,8)}…)`);
-                                setManifestShowIModelDropdown(false);
-                              }}
-                            >
-                              <div className="font-medium">{m.displayName}</div>
-                              <div className="text-xs text-muted-foreground">{m.id}</div>
-                            </div>
-                          ))}
-                        {manifestIModels.filter(m => m.displayName.toLowerCase().includes(manifestIModelSearch.toLowerCase()) || m.id.toLowerCase().includes(manifestIModelSearch.toLowerCase())).length === 0 && manifestIModelSearch && (
-                          <div className="px-3 py-2 text-sm text-muted-foreground">No iModels found matching "{manifestIModelSearch}"</div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* iModel + Display Name */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="manifest-im">iModel<span className="text-red-500 ml-0.5">*</span></Label>
+                      <div className="relative" ref={manifestIModelDropdownRef}>
+                        <Input
+                          id="manifest-im"
+                          placeholder={!selectedITwinId ? 'Select an iTwin first' : manifestIModels.length ? 'Search and select an iModel…' : 'No iModels yet, create one'}
+                          value={manifestIModelSearch}
+                          onChange={(e) => { setManifestIModelSearch(e.target.value); setManifestShowIModelDropdown(true); }}
+                          onFocus={() => selectedITwinId && setManifestShowIModelDropdown(true)}
+                          disabled={!selectedITwinId}
+                          className="text-sm pr-8"
+                        />
+                        {manifestIModelId && manifestIModelSearch && (
+                          <button
+                            type="button"
+                            onClick={() => { setManifestIModelId(''); setManifestIModelSearch(''); setManifestShowIModelDropdown(false); }}
+                            className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
                         )}
-                        {manifestIModels.length === 0 && !manifestIModelSearch && (
-                          <div className="px-3 py-2 text-sm text-muted-foreground">No iModels in this iTwin</div>
+                        {manifestShowIModelDropdown && selectedITwinId && (
+                          <div className="absolute z-10 w-full mt-1 bg-background border rounded-md shadow-lg max-h-60 overflow-auto">
+                            <div
+                              className="px-3 py-2 hover:bg-muted cursor-pointer text-sm border-b border-border/20 bg-blue-50 dark:bg-blue-950/20"
+                              onClick={() => { setShowManifestCreateIModelModal(true); setManifestShowIModelDropdown(false); }}
+                            >
+                              <div className="flex items-center gap-2 font-medium text-blue-600 dark:text-blue-400"><Plus className="h-4 w-4" />Create New iModel</div>
+                              <div className="text-xs text-blue-500 dark:text-blue-300">Create a new iModel in this iTwin</div>
+                            </div>
+                            {manifestIModels
+                              .filter(m => !manifestIModelSearch || m.displayName.toLowerCase().includes(manifestIModelSearch.toLowerCase()) || m.id.toLowerCase().includes(manifestIModelSearch.toLowerCase()))
+                              .slice(0, 20)
+                              .map(m => (
+                                <div
+                                  key={m.id}
+                                  className="px-3 py-2 hover:bg-muted cursor-pointer text-sm border-b border-border/20 last:border-0"
+                                  onClick={() => {
+                                    setManifestIModelId(m.id);
+                                    setManifestIModelSearch(`${m.displayName} (${m.id.slice(0,8)}…)`);
+                                    setManifestShowIModelDropdown(false);
+                                  }}
+                                >
+                                  <div className="font-medium">{m.displayName}</div>
+                                  <div className="text-xs text-muted-foreground">{m.id}</div>
+                                </div>
+                              ))}
+                            {manifestIModels.filter(m => m.displayName.toLowerCase().includes(manifestIModelSearch.toLowerCase()) || m.id.toLowerCase().includes(manifestIModelSearch.toLowerCase())).length === 0 && manifestIModelSearch && (
+                              <div className="px-3 py-2 text-sm text-muted-foreground">No iModels found matching "{manifestIModelSearch}"</div>
+                            )}
+                            {manifestIModels.length === 0 && !manifestIModelSearch && (
+                              <div className="px-3 py-2 text-sm text-muted-foreground">No iModels in this iTwin</div>
+                            )}
+                          </div>
                         )}
                       </div>
-                    )}
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="dn">Display Name</Label>
+                      <Input id="dn" placeholder="My Connection" value={displayName} onChange={e=>setDisplayName(e.target.value)} />
+                    </div>
+                  </div>
+
+                  {/* Source files — two fields per row: tracking id + SAS URL */}
+                  <div className="space-y-2">
+                    <Label>Source files<span className="text-red-500 ml-0.5">*</span></Label>
+                    <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)_1.5rem] gap-x-2 text-[10px] font-medium text-muted-foreground">
+                      <span>Tracking ID <span className="font-normal">(sourceFiles[].id)</span></span>
+                      <span>SAS URL <span className="font-normal">(sourceFiles[].url)</span></span>
+                      <span/>
+                    </div>
+                    {manifestSourceFiles.map((f, i) => (
+                      <div key={i} className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)_1.5rem] gap-x-2 items-center">
+                        <Input
+                          placeholder="e.g. my-revit-file"
+                          value={f.id}
+                          onChange={e => {
+                            const next = [...manifestSourceFiles];
+                            next[i] = {...next[i], id: e.target.value};
+                            setManifestSourceFiles(next);
+                          }}
+                        />
+                        <Input
+                          placeholder="https://account.blob.core.windows.net/…?sv=…&sig=…"
+                          value={f.url}
+                          onChange={e => {
+                            const next = [...manifestSourceFiles];
+                            next[i] = {...next[i], url: e.target.value};
+                            setManifestSourceFiles(next);
+                          }}
+                        />
+                        {manifestSourceFiles.length > 1 ? (
+                          <button
+                            type="button"
+                            onClick={() => setManifestSourceFiles(files => files.filter((_, j) => j !== i))}
+                            className="text-muted-foreground hover:text-red-500"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        ) : <span/>}
+                      </div>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => setManifestSourceFiles(files => [...files, {id: '', url: ''}])}
+                      className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                    >
+                      <Plus className="h-3.5 w-3.5" />Add another file
+                    </button>
+                    <p className="text-[10px] text-muted-foreground">
+                      Tracking ID is reused as <code>sourceFiles[].id</code> in both bridge and unmap payloads.
+                      SAS URL is the pre-authenticated blob URL sent as <code>sourceFiles[].url</code> during bridge.
+                    </p>
                   </div>
                 </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="sf">Source File Id<span className="text-red-500 ml-0.5">*</span></Label>
-                  <Input id="sf" placeholder="blob-container-name" value={sourceFileId} onChange={e=>setSourceFileId(e.target.value)} />
-                  <p className="text-[10px] text-muted-foreground">Container name only (no URL). Example: <code>itwin</code></p>
-                </div>
+
+                {/* Create button or connected status — outside the opacity wrapper */}
+                {!createdConnection ? (
+                  <>
+                    {error && <p className="text-xs text-red-600 whitespace-pre-wrap">{error}</p>}
+                    <Button onClick={createConnection} disabled={!canCreate}>
+                      {creating && <Loader2 className="h-4 w-4 mr-2 animate-spin"/>}
+                      Create ManifestConnection
+                    </Button>
+                  </>
+                ) : (
+                  <div className="rounded border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950/30 px-3 py-2 text-xs">
+                    <span className="font-medium text-green-800 dark:text-green-300">{createdConnection.displayName || 'ManifestConnection'}</span>
+                    <span className="ml-2 font-mono text-green-700 dark:text-green-400">{createdConnection.id}</span>
+                  </div>
+                )}
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label htmlFor="sas">SAS URL (optional)</Label>
-                  <Input id="sas" placeholder="https://account.blob.core.windows.net/itwin?..." value={manifestSourceFileSasUrl} onChange={e=>setManifestSourceFileSasUrl(e.target.value)} />
-                  <p className="text-[10px] text-muted-foreground">Provide to send explicit run body; otherwise omit.</p>
+
+              <div className="border-t" />
+
+              {/* ======= STAGE 2 — Configure & Run ======= */}
+              <div className={`space-y-3 ${!createdConnection ? 'opacity-50 pointer-events-none select-none' : ''}`}>
+                <div className="flex items-center gap-2 pb-0.5 border-b">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground bg-muted px-1.5 py-0.5 rounded">Stage 2</span>
+                  <span className="text-xs font-semibold">Configure & Run</span>
+                  {!createdConnection && <span className="text-[10px] text-muted-foreground italic ml-1">create connection first</span>}
                 </div>
-                <div className="space-y-1.5">
+
+                {/* Source file picker from registered files */}
+                {connectionSourceFiles.length > 0 && (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="bridge-file-picker">Source file to bridge</Label>
+                    <select
+                      id="bridge-file-picker"
+                      value={selectedBridgeFileId}
+                      onChange={e => setSelectedBridgeFileId(e.target.value)}
+                      className="w-full border rounded px-2 py-1 text-sm bg-background"
+                    >
+                      {connectionSourceFiles.map(f => (
+                        <option key={f.id} value={f.id}>{f.id}{!f.url ? ' — ⚠ no SAS URL' : ''}</option>
+                      ))}
+                    </select>
+                    {(() => {
+                      const sel = connectionSourceFiles.find(f => f.id === selectedBridgeFileId);
+                      return sel?.url
+                        ? <p className="text-[10px] text-muted-foreground font-mono break-all">URL: {sel.url}</p>
+                        : <p className="text-[10px] text-amber-600 dark:text-amber-400">No SAS URL registered for this file — bridge run will omit the url field and the API will likely reject it.</p>;
+                    })()}
+                  </div>
+                )}
+
+                {/* Connector Type — always visible once connection exists */}
+                <div className="space-y-1.5 md:w-1/2">
                   <Label htmlFor="manifest-connector">Connector Type</Label>
                   <select
                     id="manifest-connector"
@@ -1085,36 +1578,464 @@ export default function SynchronizationComponent() {
                     <option value="CIVIL3D">Civil3D</option>
                     <option value="GEOSPATIAL">GeoJSON</option>
                   </select>
-                  <p className="text-[10px] text-muted-foreground">Used only when SAS URL supplied.</p>
                 </div>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+
+                {/* Master file name — required for bridge runs */}
                 <div className="space-y-1.5">
-                  <Label htmlFor="dn">Display Name</Label>
-                  <Input id="dn" placeholder="My Connection" value={displayName} onChange={e=>setDisplayName(e.target.value)} />
+                  <Label htmlFor="manifest-name">
+                    Master file name<span className="text-red-500 ml-0.5">*</span>{' '}
+                    <span className="font-normal text-[10px] text-muted-foreground">(sourceFiles[].name → masterFile.name)</span>
+                  </Label>
+                  <Input
+                    id="manifest-name"
+                    placeholder="e.g. Bldg_274_Structural.rvt"
+                    value={manifestMasterFileName}
+                    onChange={e => setManifestMasterFileName(e.target.value)}
+                    className={bridgeNameMissing && createdConnection ? 'border-red-400 focus-visible:ring-red-400' : ''}
+                  />
+                  {bridgeNameMissing && createdConnection && (
+                    <p className="text-[11px] text-red-600">Required — Start Run is disabled until this is filled.</p>
+                  )}
                 </div>
+
+                {/* A/B test controls (optional overrides) */}
+                <div className="space-y-1.5">
+                  <button
+                    type="button"
+                    className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+                    onClick={() => setShowManifestAdvanced(v => !v)}
+                  >
+                    <ChevronRight className={`h-3.5 w-3.5 transition-transform ${showManifestAdvanced ? 'rotate-90' : ''}`} />
+                    A/B test controls (documentAttribute, id override)
+                  </button>
+                  {showManifestAdvanced && (
+                    <div className="pl-4 space-y-3 border-l-2 border-muted">
+                      <p className="text-[10px] text-muted-foreground">
+                        Optional overrides. Leave blank to use picker defaults.
+                      </p>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="manifest-run-sfid">
+                          Override run source file ID{' '}
+                          <span className="font-normal text-muted-foreground">(overrides Stage 2 picker)</span>
+                        </Label>
+                        <Input
+                          id="manifest-run-sfid"
+                          placeholder={selectedBridgeFileId.trim() || manifestSourceFiles[0]?.id?.trim() || 'defaults to picker selection above'}
+                          value={manifestRunSourceFileId}
+                          onChange={e => setManifestRunSourceFileId(e.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            id="omit-doc-attr"
+                            checked={omitDocumentAttribute}
+                            onChange={e => setOmitDocumentAttribute(e.target.checked)}
+                            className="h-3.5 w-3.5"
+                          />
+                          <label htmlFor="omit-doc-attr" className="text-xs cursor-pointer select-none">
+                            Omit <code>documentAttribute</code> entirely
+                          </label>
+                        </div>
+                        {!omitDocumentAttribute && (
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                            <div className="space-y-1.5">
+                              <Label htmlFor="manifest-da-classname">
+                                className{' '}
+                                <span className="font-normal text-muted-foreground">(documentAttribute.className)</span>
+                              </Label>
+                              <Input
+                                id="manifest-da-classname"
+                                placeholder="DocumentMetadata:DocumentLink"
+                                value={manifestDocumentAttributeClassName}
+                                onChange={e => setManifestDocumentAttributeClassName(e.target.value)}
+                              />
+                            </div>
+                            <div className="space-y-1.5">
+                              <Label htmlFor="manifest-userlabel">
+                                userLabel{' '}
+                                <span className="font-normal text-muted-foreground">(properties.userLabel)</span>
+                              </Label>
+                              <Input
+                                id="manifest-userlabel"
+                                placeholder="blank to omit"
+                                value={manifestUserLabel}
+                                onChange={e => setManifestUserLabel(e.target.value)}
+                              />
+                            </div>
+                            <div className="space-y-1.5">
+                              <Label htmlFor="manifest-codevalue">
+                                CodeValue{' '}
+                                <span className="font-normal text-muted-foreground">(properties.CodeValue)</span>
+                              </Label>
+                              <Input
+                                id="manifest-codevalue"
+                                placeholder="blank to omit"
+                                value={manifestCodeValue}
+                                onChange={e => setManifestCodeValue(e.target.value)}
+                              />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Start Run */}
+                <div className="flex items-center gap-3 flex-wrap">
+                  <Button variant="outline" onClick={startRun} disabled={!canRun}>
+                    {runSubmitting && <Loader2 className="h-4 w-4 mr-2 animate-spin"/>}
+                    Start Run
+                  </Button>
+                </div>
+                {error && createdConnection && (
+                  <p className="text-xs text-red-600 whitespace-pre-wrap">{error}</p>
+                )}
+
+                {/* Bridge run status */}
+                {(runLocation || manifestRunPoll?.type === 'bridge') && (
+                  <div className="rounded border bg-muted/40 p-2 space-y-1.5 text-xs">
+                    {runLocation && (
+                      <div>
+                        <span className="text-muted-foreground">Run location: </span>
+                        <a href={runLocation} target="_blank" rel="noreferrer" className="underline font-mono">
+                          {parseRunIdFromLocation(runLocation) || runLocation}
+                        </a>
+                      </div>
+                    )}
+                    {manifestRunPoll?.type === 'bridge' && (
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {manifestRunPoll.polling && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
+                          <span className="capitalize font-medium">{manifestRunPoll.type}</span>
+                          {manifestRunPoll.state && <span className="text-muted-foreground">state={manifestRunPoll.state}</span>}
+                          {manifestRunPoll.result && (
+                            <span className={manifestRunPoll.result.toLowerCase() === 'success' ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}>
+                              result={manifestRunPoll.result}
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            className="text-muted-foreground underline hover:text-foreground ml-auto"
+                            onClick={() => void refreshManifestRunStatus()}
+                          >
+                            ↻ refresh
+                          </button>
+                          {manifestRunPoll.polling && (
+                            <button
+                              type="button"
+                              className="text-muted-foreground underline hover:text-foreground"
+                              onClick={() => stopJobPolling('manifest')}
+                            >
+                              stop polling
+                            </button>
+                          )}
+                        </div>
+                        {manifestRunPoll.startDateTime && (
+                          <div className="text-muted-foreground">
+                            <span>started {new Date(manifestRunPoll.startDateTime).toLocaleTimeString()}</span>
+                            {manifestRunPoll.endDateTime && !manifestRunPoll.polling && (
+                              <span className="ml-2">ended {new Date(manifestRunPoll.endDateTime).toLocaleTimeString()}</span>
+                            )}
+                          </div>
+                        )}
+                        {!manifestRunPoll.polling &&
+                          renderDiagnosticPanel(manifestRunPoll.errorKey, manifestRunPoll.description, manifestRunPoll.tasks, manifestRunReport, manifestRunRaw)}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Run body sent to API */}
+                {lastRunBody && (
+                  <details className="text-xs">
+                    <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
+                      Run body sent to API (compare against reference manifests)
+                    </summary>
+                    <pre className="mt-1.5 p-2 bg-muted rounded text-[11px] overflow-x-auto whitespace-pre-wrap break-all">
+                      {JSON.stringify(lastRunBody, null, 2)}
+                    </pre>
+                  </details>
+                )}
               </div>
-              {error && <p className="text-xs text-red-600">{error}</p>}
-              <div className="flex items-center gap-2">
-                <Button onClick={createConnection} disabled={!canCreate}>
-                  {creating && <Loader2 className="h-4 w-4 mr-2 animate-spin"/>}
-                  Create ManifestConnection
+
+              <div className="border-t" />
+
+              {/* ======= STAGE 3 — Unmap ======= */}
+              <div className={`space-y-3 ${!createdConnection ? 'opacity-50 pointer-events-none select-none' : ''}`}>
+                <div className="flex items-center gap-2 pb-0.5 border-b">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground bg-muted px-1.5 py-0.5 rounded">Stage 3</span>
+                  <span className="text-xs font-semibold">Unmap</span>
+                  {createdConnection && !lastBridgeSucceeded && (
+                    <span className="text-[10px] text-muted-foreground italic ml-1">requires a successful bridge run</span>
+                  )}
+                </div>
+
+                {/* File picker for unmap */}
+                {connectionSourceFiles.length > 0 ? (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="unmap-file-picker">Source file to unmap</Label>
+                    <select
+                      id="unmap-file-picker"
+                      value={selectedUnmapFileId}
+                      onChange={e => setSelectedUnmapFileId(e.target.value)}
+                      className="w-full border rounded px-2 py-1 text-sm bg-background"
+                    >
+                      {connectionSourceFiles.map(f => (
+                        <option key={f.id} value={f.id}>{f.id}</option>
+                      ))}
+                    </select>
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    <Label>Source file ID <span className="font-normal text-[10px] text-muted-foreground">(auto-filled from Stage 2)</span></Label>
+                    <Input
+                      readOnly
+                      value={selectedUnmapFileId || manifestSourceFiles[0]?.id || ''}
+                      className="bg-muted/40 cursor-default"
+                      tabIndex={-1}
+                    />
+                  </div>
+                )}
+
+                {/* Unmap A/B test controls */}
+                <div className="space-y-1.5">
+                  <button
+                    type="button"
+                    className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+                    onClick={() => setShowUnmapAdvanced(v => !v)}
+                  >
+                    <ChevronRight className={`h-3.5 w-3.5 transition-transform ${showUnmapAdvanced ? 'rotate-90' : ''}`} />
+                    A/B test controls (name, documentAttribute)
+                  </button>
+                  {showUnmapAdvanced && (
+                    <div className="pl-4 space-y-3 border-l-2 border-muted">
+                      <p className="text-[10px] text-muted-foreground">
+                        Optional — include these in the unmap payload to test their effect. Leave blank to send a bare unmap.
+                      </p>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="unmap-name">
+                          Master file name{' '}
+                          <span className="font-normal text-muted-foreground">(sourceFiles[].name — optional for unmap)</span>
+                        </Label>
+                        <Input
+                          id="unmap-name"
+                          placeholder="e.g. Bldg_274_Structural.rvt — blank to omit"
+                          value={unmapMasterFileName}
+                          onChange={e => setUnmapMasterFileName(e.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            id="omit-unmap-doc-attr"
+                            checked={omitUnmapDocumentAttribute}
+                            onChange={e => setOmitUnmapDocumentAttribute(e.target.checked)}
+                            className="h-3.5 w-3.5"
+                          />
+                          <label htmlFor="omit-unmap-doc-attr" className="text-xs cursor-pointer select-none">
+                            Omit <code>documentAttribute</code> entirely
+                          </label>
+                        </div>
+                        {!omitUnmapDocumentAttribute && (
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                            <div className="space-y-1.5">
+                              <Label htmlFor="unmap-da-classname">
+                                className{' '}
+                                <span className="font-normal text-muted-foreground">(documentAttribute.className)</span>
+                              </Label>
+                              <Input
+                                id="unmap-da-classname"
+                                placeholder="DocumentMetadata:DocumentLink"
+                                value={unmapDocumentAttributeClassName}
+                                onChange={e => setUnmapDocumentAttributeClassName(e.target.value)}
+                              />
+                            </div>
+                            <div className="space-y-1.5">
+                              <Label htmlFor="unmap-userlabel">
+                                userLabel{' '}
+                                <span className="font-normal text-muted-foreground">(properties.userLabel)</span>
+                              </Label>
+                              <Input
+                                id="unmap-userlabel"
+                                placeholder="blank to omit"
+                                value={unmapUserLabel}
+                                onChange={e => setUnmapUserLabel(e.target.value)}
+                              />
+                            </div>
+                            <div className="space-y-1.5">
+                              <Label htmlFor="unmap-codevalue">
+                                CodeValue{' '}
+                                <span className="font-normal text-muted-foreground">(properties.CodeValue)</span>
+                                {fileCodeValues[selectedUnmapFileId] && (
+                                  <span className="ml-1 text-[10px] text-blue-500 dark:text-blue-400">
+                                    {unmapCodeValue === fileCodeValues[selectedUnmapFileId] ? '← from Stage 2' : ''}
+                                  </span>
+                                )}
+                              </Label>
+                              <Input
+                                id="unmap-codevalue"
+                                placeholder="blank to omit"
+                                value={unmapCodeValue}
+                                onChange={e => setUnmapCodeValue(e.target.value)}
+                              />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <Button variant="outline" onClick={startUnmap} disabled={!canUnmap}>
+                  {unmapSubmitting && <Loader2 className="h-4 w-4 mr-2 animate-spin"/>}
+                  Unmap
                 </Button>
-                <Button variant="outline" onClick={startRun} disabled={!canRun}>
-                  {runSubmitting && <Loader2 className="h-4 w-4 mr-2 animate-spin"/>}
-                  Start Run
-                </Button>
+
+                {/* Unmap run status */}
+                {(unmapLocation || manifestRunPoll?.type === 'unmap') && (
+                  <div className="rounded border bg-muted/40 p-2 space-y-1.5 text-xs">
+                    {unmapLocation && (
+                      <div>
+                        <span className="text-muted-foreground">Unmap run: </span>
+                        <a href={unmapLocation} target="_blank" rel="noreferrer" className="underline font-mono">
+                          {parseRunIdFromLocation(unmapLocation) || unmapLocation}
+                        </a>
+                      </div>
+                    )}
+                    {manifestRunPoll?.type === 'unmap' && (
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {manifestRunPoll.polling && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
+                          <span className="capitalize font-medium">{manifestRunPoll.type}</span>
+                          {manifestRunPoll.state && <span className="text-muted-foreground">state={manifestRunPoll.state}</span>}
+                          {manifestRunPoll.result && (
+                            <span className={manifestRunPoll.result.toLowerCase() === 'success' ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}>
+                              result={manifestRunPoll.result}
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            className="text-muted-foreground underline hover:text-foreground ml-auto"
+                            onClick={() => void refreshManifestRunStatus()}
+                          >
+                            ↻ refresh
+                          </button>
+                          {manifestRunPoll.polling && (
+                            <button
+                              type="button"
+                              className="text-muted-foreground underline hover:text-foreground"
+                              onClick={() => stopJobPolling('manifest')}
+                            >
+                              stop polling
+                            </button>
+                          )}
+                        </div>
+                        {manifestRunPoll.startDateTime && (
+                          <div className="text-muted-foreground">
+                            <span>started {new Date(manifestRunPoll.startDateTime).toLocaleTimeString()}</span>
+                            {manifestRunPoll.endDateTime && !manifestRunPoll.polling && (
+                              <span className="ml-2">ended {new Date(manifestRunPoll.endDateTime).toLocaleTimeString()}</span>
+                            )}
+                          </div>
+                        )}
+                        {!manifestRunPoll.polling &&
+                          renderDiagnosticPanel(manifestRunPoll.errorKey, manifestRunPoll.description, manifestRunPoll.tasks, manifestRunReport, manifestRunRaw)}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
-              {createdConnection && (
-                <div className="text-xs text-muted-foreground">
-                  Created connection: <span className="font-mono">{createdConnection.id}</span>
-                </div>
+
+              {/* ======= RUN HISTORY ======= */}
+              {runHistory.length > 0 && (
+                <>
+                  <div className="border-t" />
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+                        Run history ({runHistory.length})
+                      </span>
+                      <button
+                        type="button"
+                        className="text-[10px] text-muted-foreground underline hover:text-foreground"
+                        onClick={() => setRunHistory([])}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    <div className="space-y-1.5">
+                      {runHistory.map(entry => {
+                        const resultColor = entry.result
+                          ? entry.result.toLowerCase() === 'success'
+                            ? 'text-green-600 dark:text-green-400'
+                            : 'text-red-600 dark:text-red-400'
+                          : 'text-muted-foreground';
+                        return (
+                          <details key={entry.id} className="rounded border bg-muted/30 text-xs group">
+                            <summary className="flex items-center gap-2 px-2 py-1.5 cursor-pointer select-none list-none hover:bg-muted/50 rounded">
+                              <span className="font-mono text-[10px] text-muted-foreground shrink-0">
+                                {new Date(entry.timestamp).toLocaleTimeString()}
+                              </span>
+                              <span className={`shrink-0 font-semibold uppercase text-[10px] px-1 rounded ${entry.action === 'bridge' ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300' : 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300'}`}>
+                                {entry.action}
+                              </span>
+                              <span className="font-mono truncate text-muted-foreground" title={entry.sourceFileId}>
+                                {entry.sourceFileId}
+                              </span>
+                              {entry.state && (
+                                <span className="shrink-0 text-muted-foreground">state={entry.state}</span>
+                              )}
+                              {entry.result && (
+                                <span className={`shrink-0 ${resultColor}`}>result={entry.result}</span>
+                              )}
+                              {!entry.state && entry.runId && (
+                                <span className="shrink-0 italic text-muted-foreground text-[10px]">status unknown</span>
+                              )}
+                              {!entry.runId && (
+                                <span className="shrink-0 text-red-500 text-[10px]">no run ID</span>
+                              )}
+                              {entry.fetching && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground shrink-0" />}
+                            </summary>
+                            <div className="px-2 pb-2 space-y-2 border-t mt-0 pt-2">
+                              {/* Run ID + status actions */}
+                              <div className="flex items-center gap-2 flex-wrap text-[10px]">
+                                {entry.runId && (
+                                  <span className="font-mono text-muted-foreground break-all">Run: {entry.runId}</span>
+                                )}
+                                {entry.runId && !entry.fetching && (
+                                  <button
+                                    type="button"
+                                    className="underline text-muted-foreground hover:text-foreground shrink-0"
+                                    onClick={() => void fetchHistoryEntryStatus(entry.id, entry.connectionId, entry.iModelId, entry.runId!)}
+                                  >
+                                    {entry.state ? '↻ refresh status' : 'Fetch status'}
+                                  </button>
+                                )}
+                              </div>
+                              {/* Request payload */}
+                              <details>
+                                <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground text-[10px]">
+                                  Request payload
+                                </summary>
+                                <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-all text-[10px] bg-muted p-1.5 rounded">
+                                  {JSON.stringify(entry.runBody, null, 2)}
+                                </pre>
+                              </details>
+                              {/* Inline diagnostics once status is known */}
+                              {entry.state && renderDiagnosticPanel(entry.errorKey, entry.description, entry.tasks, entry.report ?? null, entry.rawRunResponse)}
+                            </div>
+                          </details>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </>
               )}
-              {runLocation && (
-                <div className="text-xs">
-                  Run Location: <a href={runLocation} target="_blank" rel="noreferrer" className="underline">{runLocation}</a>
-                </div>
-              )}
+
             </div>
           </CardContent>
         </Card>
@@ -1357,9 +2278,13 @@ export default function SynchronizationComponent() {
                               Run: <span className="font-mono">{autoBatchRun.runId}</span>
                               {autoBatchRun.polling ? <span className="ml-2">(polling…)</span> : null}
                               {(autoBatchRun.state || autoBatchRun.result) && (
-                                <div className="mt-1">
+                                <div className="mt-1 flex flex-wrap gap-2">
                                   {autoBatchRun.state ? <span>state={autoBatchRun.state}</span> : null}
-                                  {autoBatchRun.result ? <span className="ml-2">result={autoBatchRun.result}</span> : null}
+                                  {autoBatchRun.result ? (
+                                    <span className={['error','failed'].includes((autoBatchRun.result || '').toLowerCase()) ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}>
+                                      result={autoBatchRun.result}
+                                    </span>
+                                  ) : null}
                                 </div>
                               )}
                               {autoBatchRun.polling && (
@@ -1369,6 +2294,9 @@ export default function SynchronizationComponent() {
                                   </Button>
                                 </div>
                               )}
+                              {!autoBatchRun.polling &&
+                                ['error', 'failed'].includes((autoBatchRun.result || '').toLowerCase()) &&
+                                renderDiagnosticPanel(undefined, undefined, undefined, storageRunReport)}
                             </div>
                           )}
                         </div>

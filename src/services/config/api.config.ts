@@ -63,7 +63,7 @@ export const API_CONFIG = {
       MANIFEST_CONNECTIONS: '/synchronization/imodels/manifestconnections',
       MANIFEST_CONNECTION: (connectionId: string) => `/synchronization/imodels/manifestconnections/${connectionId}`,
       MANIFEST_RUNS: (connectionId: string) => `/synchronization/imodels/manifestconnections/${connectionId}/runs`,
-      MANIFEST_RUN: (connectionId: string, runId: string) => `/synchronization/imodels/manifestconnections/${connectionId}/runs/${runId}`,
+      MANIFEST_RUN: (connectionId: string, runId: string) => `/synchronization/imodels/manifestconnections/${connectionId}/runs/${runId}?$expand=tasks`,
       REPORTS: (iModelId: string, runId: string, taskId?: string) => `/synchronization/reports?imodelId=${iModelId}&runId=${runId}${taskId ? `&taskId=${taskId}`: ''}`,
       // Storage Connections
       STORAGE_CONNECTIONS: '/synchronization/imodels/storageconnections',

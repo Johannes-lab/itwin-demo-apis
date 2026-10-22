@@ -41,9 +41,9 @@ export interface CreateManifestRunSourceFileChild {
 
 export interface CreateManifestRunSourceFile {
   id: string;
-  name: string;
+  name?: string | null;
   action: 'bridge' | 'unmap';
-  url: string;
+  url?: string;
   connectorType: string;
   relativePath?: string | null;
   documentAttribute?: Record<string, unknown>;
@@ -55,6 +55,23 @@ export interface ManifestRunCreateRequest {
   sourceFiles?: CreateManifestRunSourceFile[];
 }
 
+export interface RunTask {
+  id?: string;
+  state?: string;
+  result?: string;
+  startDateTime?: string;
+  endDateTime?: string;
+  errorCode?: string;
+  message?: string;
+  details?: string;
+  bridgeExitCode?: number;
+  system?: string;
+  phase?: string;
+  category?: string;
+  descriptionKey?: string;
+  description?: string;
+}
+
 export interface ManifestRun {
   id: string;
   connectionId: string;
@@ -63,6 +80,12 @@ export interface ManifestRun {
   phase?: string;
   state: string;
   result?: string;
+  errorKey?: string;
+  description?: string;
+  tasks?: RunTask[];
 }
 
 export interface ManifestRunResponse { run: ManifestRun }
+
+// /synchronization/reports response — shape is flexible across API versions
+export type SyncReportResponse = Record<string, unknown>
